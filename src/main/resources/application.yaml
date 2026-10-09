@@ -1,0 +1,49 @@
+spring.config.import: optional:file:.env[.properties]
+spring:
+  application:
+    name: rag-chatbot
+
+  # MySQL 연결 (환경변수가 없으면 로컬 기본값 사용)
+  datasource:
+    url: "jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:rag_chatbot}?serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true&useSSL=false"
+    username: ${DB_USERNAME:root}
+    password: formcotqht123
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: ${JPA_DDL_AUTO:update}    # 운영에서는 validate 또는 none 권장
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: Asia/Seoul
+
+  # PDF 업로드 용량 제한
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 20MB
+
+# 벡터 DB (Qdrant) - REST 포트 6333
+qdrant:
+  host: ${QDRANT_HOST:localhost}
+  port: ${QDRANT_PORT:6333}
+  api-key: ${QDRANT_API_KEY:}             # 로컬은 비워둠, Qdrant Cloud는 필수
+  collection: ${QDRANT_COLLECTION:company-regulations}
+  vector-size: ${QDRANT_VECTOR_SIZE:1536} # text-embedding-3-small 기준
+
+# OpenAI API (추후 연동)
+openai:
+  api-key: ${OPENAI_API_KEY:}
+  base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+  chat-model: ${OPENAI_CHAT_MODEL:gpt-4o-mini}
+  embedding-model: ${OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
+
+logging:
+  level:
+    com.hsleecoder.ragchatbot: DEBUG
+
+app:
+  upload-dir: ${UPLOAD_DIR:./uploads}
