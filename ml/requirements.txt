@@ -1,0 +1,6 @@
+# 임베딩 학습에 필요한 라이브러리 목록
+# 주의: torch(PyTorch)는 넣지 않는다.
+#   EC2의 AMI에 GPU에 맞는 버전이 이미 설치되어 있어서, pip로 다시 설치하면 덮어써서 GPU가 안 잡힐 수 있다.
+sentence-transformers>=3.0
+datasets
+accelerate

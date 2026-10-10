@@ -39,6 +39,12 @@ out/
 ### env 파일 제외 ###
 .env
 
-### aws 키 파일 제외 ###
+### aws 키 파일 제외(혹시모를상황대비) ###
 *.ppk
 *.pem
+
+/ml/output/
+
+*.log
+
+nohup.out
