@@ -1,0 +1,4 @@
+# 학습 데이터(문제집) 만들기에 필요한 라이브러리 목록 (PDF 청킹 + OpenAI 질문 합성)
+# 모델 학습용 라이브러리는 requirements.txt 에 따로 있다.
+pdfplumber
+openai
