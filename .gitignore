@@ -43,8 +43,19 @@ out/
 *.ppk
 *.pem
 
+### 모델 파일 및 학습 데이터 ###
 /ml/output/
-
 *.log
-
 nohup.out
+
+### 원문 PDF (저작권과 내부 정보 보호). 출처는 docs/SOURCES.md 에만 기록한다 ###
+*.pdf
+!docs/*.pdf
+
+### 합성한 학습 데이터는 원문 조각이 들어 있으므로 일단 제외 (올릴지는 나중에 결정) ###
+ml/data/pairs/
+
+### 청크 파일 ###
+ml/data/chunks/
+.venv/
+__pycache__/
