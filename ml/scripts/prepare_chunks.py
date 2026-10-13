@@ -36,6 +36,8 @@ ARTICLE_RE = re.compile(r"^\s*제\s*(\d+)\s*조(?:\s*의\s*(\d+))?\s*[\(（]([^)
 CHAPTER_RE = re.compile(r"^\s*제\s*\d+\s*(?:장|절)")
 # 줄 전체가 숫자 하나뿐인 경우는 쪽 번호로 보고 버린다
 PAGE_NUMBER_RE = re.compile(r"^\s*[-–]?\s*\d{1,3}\s*[-–]?\s*$")
+# 목차 줄은 "제1조(목적) ········ 7" 처럼 점선(······)으로 쪽 번호가 이어진다. 내용이 아니므로 버린다
+LEADER_RE = re.compile(r"[·∙⋅・…⋯]{3,}|\.{5,}")
 # 줄 끝이 이 글자면 문장이 끝난 것으로 보고 다음 줄은 줄바꿈으로 이어 붙인다
 SENTENCE_END = (".", ":", "?", "!", "。")
 
@@ -47,6 +49,7 @@ def extract_lines(pdf_path: Path) -> tuple[list[tuple[int, str]], dict]:
     lines: list[tuple[int, str]] = []
     empty_pages = 0
     total_chars = 0
+    toc_lines = 0
     with pdfplumber.open(pdf_path) as pdf:
         num_pages = len(pdf.pages)
         for page_no, page in enumerate(pdf.pages, start=1):
@@ -57,9 +60,12 @@ def extract_lines(pdf_path: Path) -> tuple[list[tuple[int, str]], dict]:
                 line = raw.strip()
                 if not line or PAGE_NUMBER_RE.match(line):
                     continue
+                if LEADER_RE.search(line):  # 목차 줄
+                    toc_lines += 1
+                    continue
                 lines.append((page_no, line))
                 total_chars += len(line)
-    return lines, {"pages": num_pages, "empty_pages": empty_pages, "chars": total_chars}
+    return lines, {"pages": num_pages, "empty_pages": empty_pages, "chars": total_chars, "toc_lines": toc_lines}
 
 
 def join_lines(lines: list[str]) -> str:
@@ -129,16 +135,22 @@ def pack_block(block: dict, max_chars: int) -> list[dict]:
     return chunks
 
 
-def process_pdf(pdf_path: Path, max_chars: int, min_chars: int) -> tuple[list[dict], dict]:
+def process_pdf(pdf_path: Path, max_chars: int, min_chars: int, keep_preamble: bool = False) -> tuple[list[dict], dict]:
     """PDF 하나를 청크 목록으로 바꾼다."""
     lines, stats = extract_lines(pdf_path)
     blocks = split_into_articles(lines)
+    # "제N조(제목)" 구조가 있는 문서에서, 조항에 속하지 않는 앞부분(표지, 목차, 작성 안내문)은 규정 내용이 아니다
+    has_articles = any(block["heading"] for block in blocks)
 
     chunks: list[dict] = []
     dropped = 0
+    preamble = 0
     for block in blocks:
         for chunk in pack_block(block, max_chars):
-            if len(chunk["text"]) < min_chars:  # 너무 짧은 조각(목차 줄 등)은 학습에 도움이 안 되어 제외
+            if has_articles and not block["heading"] and not keep_preamble:
+                preamble += 1
+                continue
+            if len(chunk["text"]) < min_chars:  # 너무 짧은 조각은 학습에 도움이 안 되어 제외
                 dropped += 1
                 continue
             chunks.append(chunk)
@@ -152,6 +164,7 @@ def process_pdf(pdf_path: Path, max_chars: int, min_chars: int) -> tuple[list[di
             "articles": sum(1 for b in blocks if b["heading"]),
             "chunks": len(chunks),
             "dropped": dropped,
+            "preamble": preamble,
         }
     )
     return chunks, stats
@@ -161,6 +174,10 @@ def print_report(pdf_name: str, stats: dict, chunks: list[dict]) -> None:
     """사람이 눈으로 확인할 수 있게 PDF별 점검 결과를 보여준다."""
     print(f"\n=== {pdf_name} ===")
     print(f"  쪽 수 {stats['pages']} (글자가 거의 없는 쪽 {stats['empty_pages']}) / 뽑힌 글자 수 {stats['chars']}")
+    if stats.get("preamble"):
+        print(f"  조항에 속하지 않는 앞부분(표지, 안내문 등) 조각 {stats['preamble']}개는 규정 내용이 아니라서 제외했습니다.")
+    if stats.get("toc_lines"):
+        print(f"  목차 줄 {stats['toc_lines']}개는 내용이 아니라서 제외했습니다.")
     print(f"  조항(제N조) 감지 {stats['articles']}개 / 청크 {stats['chunks']}개 (짧아서 제외 {stats['dropped']}개)")
     if chunks:
         lengths = [len(c["text"]) for c in chunks]
@@ -185,6 +202,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="청크를 저장할 .jsonl 경로")
     parser.add_argument("--max-chars", type=int, default=700, help="청크 하나의 최대 글자 수")
     parser.add_argument("--min-chars", type=int, default=40, help="이보다 짧은 조각은 제외")
+    parser.add_argument("--keep-preamble", action="store_true", help="조항 앞의 표지, 안내문 조각도 제외하지 않고 포함")
     parser.add_argument("--report-only", action="store_true", help="점검 결과만 보고 파일은 만들지 않음")
     return parser.parse_args()
 
@@ -198,7 +216,7 @@ def main() -> None:
 
     all_chunks: list[dict] = []
     for pdf_path in pdf_files:
-        chunks, stats = process_pdf(pdf_path, args.max_chars, args.min_chars)
+        chunks, stats = process_pdf(pdf_path, args.max_chars, args.min_chars, args.keep_preamble)
         print_report(pdf_path.name, stats, chunks)
         all_chunks.extend(chunks)
 

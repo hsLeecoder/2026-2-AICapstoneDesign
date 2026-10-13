@@ -2,3 +2,4 @@
 # 모델 학습용 라이브러리는 requirements.txt 에 따로 있다.
 pdfplumber
 openai
+python-dotenv   # 레포의 .env 파일에서 OpenAI 키를 자동으로 읽기 위해 사용

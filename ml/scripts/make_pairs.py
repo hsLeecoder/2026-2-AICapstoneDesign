@@ -6,7 +6,9 @@
     (이 짝이 임베딩 모델 학습의 "문제와 정답"이 된다)
 
 준비:
-    OpenAI API 키를 환경변수 OPENAI_API_KEY 로 설정해야 한다. 키는 코드, 명령어 옵션, git 에 절대 넣지 않는다.
+    OpenAI API 키가 필요하다. 레포 폴더의 .env 파일에 OPENAI_API_KEY=... 가 있으면 자동으로 읽는다
+    (Spring 설정과 같은 파일, 같은 이름). 키는 코드, 명령어 옵션, git 에 절대 넣지 않는다.
+    .env 에 OPENAI_CHAT_MODEL=모델이름 이 있으면 그 모델을 기본으로 쓴다 (--model 로 덮어쓸 수 있음).
 
 사용 예:
     # 1) API를 부르지 않고, 첫 청크로 어떤 요청을 보낼지만 확인 (키 불필요)
@@ -35,6 +37,7 @@ import time
 from pathlib import Path
 
 DEFAULT_MODEL = "gpt-5.4-mini"  # 비용이 낮은 작은 모델. 내 계정에서 쓸 수 있는 이름으로 --model 로 바꿀 수 있다.
+DEFAULT_QUESTIONS = 4  # 청크 하나당 만들 질문 수
 MAX_RETRIES = 3
 MAX_CONSECUTIVE_FAILURES = 3  # 연속으로 이만큼 실패하면 키/모델 이름 문제로 보고 멈춘다
 
@@ -49,6 +52,18 @@ SYSTEM_PROMPT = """당신은 사내 규정 Q&A 챗봇의 학습 데이터를 만
 5. 규정에 없는 내용을 지어내지 마세요.
 
 반드시 {"questions": ["질문1", "질문2"]} 형태의 JSON만 출력하세요."""
+
+
+def load_env_file() -> None:
+    """레포의 .env 파일이 있으면 그 안의 값을 환경변수로 불러온다. 이미 설정된 환경변수는 덮어쓰지 않는다."""
+    try:
+        from dotenv import find_dotenv, load_dotenv
+    except ImportError:
+        return  # python-dotenv 가 없으면 직접 설정한 환경변수만 사용
+    # 1) 명령을 실행한 폴더(위로 거슬러 올라가며) 2) 이 스크립트가 있는 폴더(위로 거슬러 올라가며) 순서로 .env 를 찾는다
+    env_path = find_dotenv(usecwd=True) or find_dotenv()
+    if env_path:
+        load_dotenv(env_path)
 
 
 def load_chunks(path: Path) -> list[dict]:
@@ -129,8 +144,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="청크에서 질문을 합성해 학습 문제집 생성")
     parser.add_argument("--chunks", required=True, help="prepare_chunks.py 가 만든 청크 .jsonl")
     parser.add_argument("--output", default="ml/data/pairs/train.jsonl", help="문제집을 저장할 .jsonl 경로")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="사용할 OpenAI 모델 이름")
-    parser.add_argument("--questions-per-chunk", type=int, default=3, help="청크 하나당 만들 질문 수")
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("OPENAI_CHAT_MODEL") or DEFAULT_MODEL,
+        help="사용할 OpenAI 모델 이름 (기본: .env 의 OPENAI_CHAT_MODEL, 없으면 코드의 기본값)",
+    )
+    parser.add_argument("--questions-per-chunk", type=int, default=DEFAULT_QUESTIONS, help="청크 하나당 만들 질문 수")
     parser.add_argument("--min-chars", type=int, default=40, help="이보다 짧은 청크는 건너뜀")
     parser.add_argument("--limit", type=int, default=None, help="앞에서부터 이 개수의 청크만 처리 (시험용)")
     parser.add_argument("--dry-run", action="store_true", help="API를 부르지 않고 요청 내용만 출력")
@@ -138,6 +157,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    load_env_file()  # parse_args 보다 먼저 해야 .env 의 모델 이름이 기본값에 반영된다
     args = parse_args()
     chunks = [c for c in load_chunks(Path(args.chunks)) if len(c["text"]) >= args.min_chars]
     if args.limit is not None:
@@ -153,7 +173,7 @@ def main() -> None:
         return
 
     if not os.environ.get("OPENAI_API_KEY"):
-        sys.exit("[오류] 환경변수 OPENAI_API_KEY 가 없습니다. 키를 환경변수로 설정한 뒤 다시 실행하세요.")
+        sys.exit("[오류] OPENAI_API_KEY 를 찾을 수 없습니다. .env 파일에 OPENAI_API_KEY=... 를 적거나 환경변수로 설정한 뒤 다시 실행하세요.")
 
     from openai import OpenAI  # 이 단계에서만 필요하므로 여기서 불러온다
 
