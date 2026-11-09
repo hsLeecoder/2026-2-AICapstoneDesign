@@ -1,7 +1,9 @@
 package com.hsleecoder.ragchatbot.global.config;
 
+import com.hsleecoder.ragchatbot.global.properties.ModelServerProperties;
 import com.hsleecoder.ragchatbot.global.properties.OpenAiProperties;
 import com.hsleecoder.ragchatbot.global.properties.QdrantProperties;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
@@ -13,6 +15,7 @@ import org.springframework.web.reactive.function.client.WebClient;
  * 대상별로 baseUrl / 인증 헤더가 다르므로 빈을 분리하고, 이름(qdrantWebClient 등)으로 주입한다.
  */
 @Configuration
+@EnableConfigurationProperties(ModelServerProperties.class)
 public class WebClientConfig {
 
     /** Qdrant REST API 호출용 WebClient. */
@@ -42,5 +45,14 @@ public class WebClientConfig {
             builder.defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + props.apiKey());
         }
         return builder.build();
+    }
+
+    /** EC2 모델 서버(검색·답변 FastAPI) 호출용 WebClient. SSH 터널 사용 시 baseUrl 은 localhost:8000. */
+    @Bean
+    public WebClient modelServerWebClient(ModelServerProperties props) {
+        return WebClient.builder()
+                .baseUrl(props.baseUrl())
+                .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                .build();
     }
 }
