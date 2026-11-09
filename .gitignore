@@ -59,3 +59,5 @@ ml/data/pairs/
 ml/data/chunks/
 .venv/
 __pycache__/
+
+ml/data/eval/
