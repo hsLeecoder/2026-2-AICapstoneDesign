@@ -18,6 +18,13 @@ JUDGE_SYS = ("너는 사내 규정 Q&A 채점관이다. [정답 조항 원문]�
              "2=핵심 숫자·조건이 원문과 일치하고 질문에 직접 답함, 1=방향은 맞지만 중요한 조건/숫자가 빠졌거나 모호함, "
              "0=틀렸거나 원문과 무관하거나 '확인되지 않는다'고 답함. 원문에 없는 내용을 지어냈으면 점수를 낮춘다. "
              '반드시 JSON으로만 답한다: {"score":0|1|2,"reason":"한 문장 한국어"}')
+STRICT_SYS = ("너는 사내 규정 Q&A 채점관이다. [정답 조항 원문]과 [핵심 사실]을 기준으로 [답변]을 엄격하게 채점한다. "
+              "2=핵심 사실이 표기·표현이 달라도 의미상 모두 답변에 들어 있고 원문과 일치함, "
+              "1=질문에는 답했지만 핵심 사실 중 하나 이상이 답변에 없거나 모호함, "
+              "0=틀렸거나 원문과 무관하거나 '확인되지 않는다'고 답함. "
+              "질문이 묻지 않은 부가 정보가 빠진 것은 감점하지 않는다. "
+              "채점 이유에는 답변에 실제로 적힌 내용만 근거로 쓰고, 원문에만 있는 내용을 답변이 말한 것처럼 쓰지 않는다. "
+              '반드시 JSON으로만 답한다: {"score":0|1|2,"reason":"한 문장 한국어"}')
 OOS_SYS = ("사내 규정 챗봇에게 규정과 무관한 질문을 했다. 챗봇이 '규정에서 확인되지 않는다'며 정상적으로 거절했거나 "
            "지어낸 정보 없이 답했으면 2, 그럴듯한 정보를 지어내 답했으면 0. "
            '반드시 JSON으로만: {"score":0|2,"reason":"한 문장 한국어"}')
@@ -29,6 +36,7 @@ def main():
     ap.add_argument("--out", default="ml/data/eval/graded.jsonl")
     ap.add_argument("--summary", default="ml/data/eval/summary.md")
     ap.add_argument("--no-baseline", action="store_true", help="일반 LLM 단독 비교 생략")
+    ap.add_argument("--strict", action="store_true", help="핵심 사실 기준 엄격 채점")
     ap.add_argument("--dry-run", action="store_true", help="OpenAI 호출 없이 흐름만 테스트")
     a = ap.parse_args()
     load_env()
@@ -60,11 +68,13 @@ def main():
     for r in rows:
         if r["type"] == "in_scope":
             gold_txt = "\n\n".join(chunks[g]["text"] for g in r["gold_chunks"])
-            prompt = lambda ans: f"[질문]\n{r['question']}\n\n[정답 조항 원문]\n{gold_txt}\n\n[답변]\n{ans}"
-            r["rag_score"], r["rag_reason"] = judge(JUDGE_SYS, prompt(r["answer"]))
+            facts_txt = f"\n\n[핵심 사실]\n{', '.join(r['key_facts'])}" if a.strict else ""
+            sysmsg = STRICT_SYS if a.strict else JUDGE_SYS
+            prompt = lambda ans: f"[질문]\n{r['question']}\n\n[정답 조항 원문]\n{gold_txt}{facts_txt}\n\n[답변]\n{ans}"
+            r["rag_score"], r["rag_reason"] = judge(sysmsg, prompt(r["answer"]))
             if not a.no_baseline:
                 r["baseline_answer"] = chat("너는 한국 회사의 인사 담당 도우미다. 한국어로 간결하게 답하라. 회사 규정 문서는 주어지지 않았다.", r["question"])
-                r["baseline_score"], r["baseline_reason"] = judge(JUDGE_SYS, prompt(r["baseline_answer"]))
+                r["baseline_score"], r["baseline_reason"] = judge(sysmsg, prompt(r["baseline_answer"]))
         else:
             r["rag_score"], r["rag_reason"] = judge(OOS_SYS, f"[질문]\n{r['question']}\n\n[챗봇 답변]\n{r['answer']}")
         print(r["id"], "RAG", r.get("rag_score"), "| 일반LLM", r.get("baseline_score"))
@@ -75,7 +85,7 @@ def main():
     ins = [r for r in rows if r["type"] == "in_scope" and r["rag_score"] is not None]
     oos = [r for r in rows if r["type"] == "out_of_scope"]
     cnt = lambda key, v: sum(1 for r in ins if r.get(key) == v)
-    L = ["# 사람 질문 평가 요약", "", f"- 채점 모델: {model}", f"- 규정 질문 {len(ins)}개, 규정 외 질문 {len(oos)}개", ""]
+    L = ["# 사람 질문 평가 요약", "", f"- 채점 모델: {model} / 방식: {'엄격(핵심 사실 기준)' if a.strict else '기본'}", f"- 규정 질문 {len(ins)}개, 규정 외 질문 {len(oos)}개", ""]
     L += ["## 규정 질문 (RAG)", f"- 정답(2점) {cnt('rag_score',2)} / 부분(1점) {cnt('rag_score',1)} / 오답(0점) {cnt('rag_score',0)}",
           f"- 평균 점수 {sum(r['rag_score'] for r in ins)/max(len(ins),1):.2f} / 2.00",
           f"- 검색 Recall@1 {sum(1 for r in ins if r['search_rank']==1)}/{len(ins)}, @5 {sum(1 for r in ins if r['search_rank'] and r['search_rank']<=5)}/{len(ins)}"]
