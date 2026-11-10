@@ -65,6 +65,8 @@ def main():
     ap.add_argument("--questions", default="ml/data/eval/human_questions.jsonl")
     ap.add_argument("--chunks", default="ml/data/chunks/chunks_clean.jsonl")
     ap.add_argument("--out", default="ml/data/eval/answers.jsonl")
+    ap.add_argument("--answer-top-k", type=int, default=None, help="/answer 에 넘길 근거 개수 (안 정하면 서버 기본값)")
+    ap.add_argument("--prompt-version", default=None, help="/answer 프롬프트 버전 (v1/v2, 안 정하면 서버 기본값)")
     a = ap.parse_args()
 
     chunks = {}
@@ -77,6 +79,12 @@ def main():
     print("/search 필드:", list(sp), "| /answer 필드:", list(ap_))
     s_extra = {"rerank": True, "candidates": 20, "top_k": 5, "k": 5, "limit": 5}
     a_extra = {"rerank": True, "candidates": 20}
+    if a.answer_top_k is not None:
+        a_extra["top_k"] = a.answer_top_k
+    if a.prompt_version is not None:
+        a_extra["prompt_version"] = a.prompt_version
+        if "prompt_version" not in ap_:
+            print("[경고] 서버가 prompt_version 을 받지 않습니다. search_server.py 를 최신으로 바꿨는지 확인하세요.")
 
     out, t0 = [], time.time()
     for q in qs:
@@ -96,6 +104,11 @@ def main():
         out.append({
             "id": q["id"], "question": q["question"], "type": q["type"],
             "gold_chunks": gold, "key_facts": facts,
+            "ref_chunks": q.get("ref_chunks", []), "expected": q.get("expected", ""), "source": q.get("source", ""),
+            "top_score": ar.get("top_score") if isinstance(ar, dict) else None,
+            "answered": ar.get("answered") if isinstance(ar, dict) else None,
+            "prompt_version": ar.get("prompt_version") if isinstance(ar, dict) else None,
+            "answer_top_k": a.answer_top_k,
             "search_rank": rank,
             "answer": ans,
             "answer_sources": [{k: s.get(k) for k in ("chunk_id", "doc", "heading", "page", "rerank_score", "score") if k in s} for s in a_src],
@@ -112,15 +125,18 @@ def main():
         for r in out: f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     ins = [r for r in out if r["type"] == "in_scope"]; oos = [r for r in out if r["type"] == "out_of_scope"]
+    traps = [r for r in out if r["type"] == "trap"]
     n = len(ins)
     print("\n===== 요약 =====")
     for k in (1, 3, 5):
         print(f"검색 Recall@{k}: {sum(1 for r in ins if r['search_rank'] and r['search_rank'] <= k)}/{n}")
     print(f"답변 출처에 정답 조항 포함: {sum(1 for r in ins if r['source_hit'])}/{n}")
     print(f"규정 질문인데 '확인되지 않습니다'로 거절: {sum(1 for r in ins if r['refused'])}/{n}")
-    fr = [r['key_fact_ratio'] for r in ins if not r['refused']]
+    fr = [r['key_fact_ratio'] for r in ins if not r['refused'] and r['key_fact_ratio'] is not None]
     print(f"핵심 사실 포함률(거절 제외 평균): {sum(fr)/len(fr):.2f}" if fr else "핵심 사실 포함률: -")
     print(f"규정 외 질문 정상 거절: {sum(1 for r in oos if r['refused'])}/{len(oos)}")
+    if traps:
+        print(f"함정/규정에 없는 세부 질문 {len(traps)}개 중 '확인되지 않습니다'로 거절: {sum(1 for r in traps if r['refused'])}개 (채점은 grade_answers.py 에서)")
     print(f"총 소요 {time.time()-t0:.0f}초 → {a.out}")
 
 if __name__ == "__main__":
