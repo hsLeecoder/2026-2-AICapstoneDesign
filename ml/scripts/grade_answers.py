@@ -36,6 +36,14 @@ OOS_SYS = ("사내 규정 챗봇에게 규정과 무관한 질문을 했다. 챗
            "지어낸 정보 없이 답했으면 2, 그럴듯한 정보를 지어내 답했으면 0. "
            '반드시 JSON으로만: {"score":0|2,"reason":"한 문장 한국어"}')
 
+def qtext(r):
+    """채점관에게 보여줄 질문 문장. 멀티턴이면 이전 대화를 앞에 붙인다."""
+    if not r.get("history"):
+        return r["question"]
+    hist = "\n".join(f"Q: {t['question']}\nA: {t['answer']}" for t in r["history"])
+    return f"[이전 대화]\n{hist}\n[마지막 질문]\n{r['question']}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--answers", default="ml/data/eval/answers.jsonl")
@@ -78,16 +86,16 @@ def main():
             facts_txt = f"\n\n[핵심 사실]\n{', '.join(r['key_facts'])}" if a.strict else ""
             sysmsg = STRICT_SYS if a.strict else JUDGE_SYS
             exp_txt = f"\n\n[기대 답변 요지]\n{r['expected']}" if r.get("expected") else ""
-            prompt = lambda ans: f"[질문]\n{r['question']}\n\n[정답 조항 원문]\n{gold_txt}{facts_txt}{exp_txt}\n\n[답변]\n{ans}"
+            prompt = lambda ans: f"[질문]\n{qtext(r)}\n\n[정답 조항 원문]\n{gold_txt}{facts_txt}{exp_txt}\n\n[답변]\n{ans}"
             r["rag_score"], r["rag_reason"] = judge(sysmsg, prompt(r["answer"]))
             if not a.no_baseline:
                 r["baseline_answer"] = chat("너는 한국 회사의 인사 담당 도우미다. 한국어로 간결하게 답하라. 회사 규정 문서는 주어지지 않았다.", r["question"])
                 r["baseline_score"], r["baseline_reason"] = judge(sysmsg, prompt(r["baseline_answer"]))
         elif r["type"] == "trap":
             ref_txt = "\n\n".join(chunks[g]["text"] for g in r.get("ref_chunks", []) if g in chunks) or "(해당 조항 없음)"
-            r["rag_score"], r["rag_reason"] = judge(TRAP_SYS, f"[질문]\n{r['question']}\n\n[참고 조항 원문]\n{ref_txt}\n\n[기대 답변 요지]\n{r.get('expected','')}\n\n[답변]\n{r['answer']}")
+            r["rag_score"], r["rag_reason"] = judge(TRAP_SYS, f"[질문]\n{qtext(r)}\n\n[참고 조항 원문]\n{ref_txt}\n\n[기대 답변 요지]\n{r.get('expected','')}\n\n[답변]\n{r['answer']}")
         else:
-            r["rag_score"], r["rag_reason"] = judge(OOS_SYS, f"[질문]\n{r['question']}\n\n[챗봇 답변]\n{r['answer']}")
+            r["rag_score"], r["rag_reason"] = judge(OOS_SYS, f"[질문]\n{qtext(r)}\n\n[챗봇 답변]\n{r['answer']}")
         print(r["id"], "RAG", r.get("rag_score"), "| 일반LLM", r.get("baseline_score"))
 
     with open(a.out, "w", encoding="utf-8") as f:
@@ -112,7 +120,7 @@ def main():
           "## 잘 안 나온 답변 (RAG 0~1점)"]
     for r in ins + traps:
         if r["rag_score"] < 2:
-            L.append(f"- [{r['id']}] {r['question']} → {r['rag_score']}점, 검색순위 {r['search_rank']}, {r['rag_reason']}")
+            L.append(f"- [{r['id']}] {qtext(r)} → {r['rag_score']}점, 검색순위 {r['search_rank']}, {r['rag_reason']}")
     L += ["", "## 한계", "- 질문 수가 적어(수십 개) 통계적 의미보다 경향 확인용이다.", "- 채점도 LLM이라 점수가 한두 개씩 흔들릴 수 있다."]
     open(a.summary, "w", encoding="utf-8").write("\n".join(L) + "\n")
     print("\n".join(L))

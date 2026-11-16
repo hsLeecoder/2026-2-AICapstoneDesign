@@ -66,6 +66,7 @@ def main():
     ap.add_argument("--chunks", default="ml/data/chunks/chunks_clean.jsonl")
     ap.add_argument("--out", default="ml/data/eval/answers.jsonl")
     ap.add_argument("--answer-top-k", type=int, default=None, help="/answer 에 넘길 근거 개수 (안 정하면 서버 기본값)")
+    ap.add_argument("--no-history", action="store_true", help="멀티턴 질문의 이전 대화를 보내지 않고 평가(멀티턴 효과 비교용)")
     ap.add_argument("--prompt-version", default=None, help="/answer 프롬프트 버전 (v1/v2, 안 정하면 서버 기본값)")
     a = ap.parse_args()
 
@@ -90,13 +91,16 @@ def main():
     for q in qs:
         gold = q["gold_chunks"]
         gmeta = [(chunks[g]["heading"], chunks[g]["page"]) for g in gold]
-        # 1) 검색 순위
-        sr = requests.post(f"{a.base}/search", json=build_body(sp, q["question"], s_extra), timeout=120).json()
-        s_src = find_sources(sr)
+        history = [] if a.no_history else q.get("history", [])
+        has_hist = bool(q.get("history"))
+        # 1) 검색 순위 (멀티턴 질문은 이전 대화가 필요해서 순위를 재지 않는다)
+        s_src = [] if has_hist else find_sources(requests.post(f"{a.base}/search", json=build_body(sp, q["question"], s_extra), timeout=120).json())
         rank = next((i + 1 for i, s in enumerate(s_src) if is_gold(s, gold, gmeta)), None)
         # 2) 답변 생성
         t = time.time()
-        ar = requests.post(f"{a.base}/answer", json=build_body(ap_, q["question"], a_extra), timeout=600).json()
+        extra = dict(a_extra)
+        if history: extra["history"] = history
+        ar = requests.post(f"{a.base}/answer", json=build_body(ap_, q["question"], extra), timeout=600).json()
         sec = round(time.time() - t, 1)
         ans, a_src = find_answer(ar), find_sources(ar)
         facts = q["key_facts"]
@@ -109,6 +113,8 @@ def main():
             "answered": ar.get("answered") if isinstance(ar, dict) else None,
             "prompt_version": ar.get("prompt_version") if isinstance(ar, dict) else None,
             "answer_top_k": a.answer_top_k,
+            "history": q.get("history", []), "history_sent": bool(history),
+            "rewritten_question": ar.get("rewritten_question") if isinstance(ar, dict) else None,
             "search_rank": rank,
             "answer": ans,
             "answer_sources": [{k: s.get(k) for k in ("chunk_id", "doc", "heading", "page", "rerank_score", "score") if k in s} for s in a_src],
@@ -124,8 +130,9 @@ def main():
     with open(a.out, "w", encoding="utf-8") as f:
         for r in out: f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    ins = [r for r in out if r["type"] == "in_scope"]; oos = [r for r in out if r["type"] == "out_of_scope"]
+    ins = [r for r in out if r["type"] == "in_scope" and not r["history"]]; oos = [r for r in out if r["type"] == "out_of_scope"]
     traps = [r for r in out if r["type"] == "trap"]
+    multi = [r for r in out if r["history"]]
     n = len(ins)
     print("\n===== 요약 =====")
     for k in (1, 3, 5):
@@ -137,6 +144,9 @@ def main():
     print(f"규정 외 질문 정상 거절: {sum(1 for r in oos if r['refused'])}/{len(oos)}")
     if traps:
         print(f"함정/규정에 없는 세부 질문 {len(traps)}개 중 '확인되지 않습니다'로 거절: {sum(1 for r in traps if r['refused'])}개 (채점은 grade_answers.py 에서)")
+    if multi:
+        print(f"멀티턴 질문 {len(multi)}개 (이전 대화 {'전송' if multi[0]['history_sent'] else '미전송'}) 중 '확인되지 않습니다'로 거절: {sum(1 for r in multi if r['refused'])}개")
+        for r in multi: print(f"  {r['id']} {r['question']} → 재작성: {r['rewritten_question']}")
     print(f"총 소요 {time.time()-t0:.0f}초 → {a.out}")
 
 if __name__ == "__main__":

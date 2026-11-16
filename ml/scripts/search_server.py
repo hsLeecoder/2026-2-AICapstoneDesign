@@ -7,13 +7,15 @@
     USE_LLM=1 nohup python -m uvicorn --app-dir ml/scripts search_server:app --host 127.0.0.1 --port 8000 > ml/output/server.log 2>&1 &
 
 설정은 환경변수로 바꿀 수 있다 (안 정하면 아래 기본값 사용):
-    MODEL_PATH        (기본 ml/output/bge-m3-finetuned/final)   임베딩 모델
+    MODEL_PATH        (기본 ml/output/bge-m3-finetuned-v3/final) 임베딩 모델 (3차 모델)
     RERANKER_PATH     (기본 BAAI/bge-reranker-v2-m3)             리랭커 모델
     USE_RERANKER      (기본 1, 끄려면 0)
     USE_LLM           (기본 0, 답변 생성을 쓰려면 1)
     LLM_PATH          (기본 Qwen/Qwen3-8B)                       답변 생성 LLM (GPU 메모리가 모자라면 Qwen/Qwen3-4B)
-    PROMPT_VERSION    (기본 v1)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화). 요청마다 prompt_version 으로 바꿀 수도 있음
-    MIN_RERANK_SCORE  (기본 0.1)                                 1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
+    PROMPT_VERSION    (기본 v2)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화). 요청마다 prompt_version 으로 바꿀 수도 있음
+    MIN_RERANK_SCORE  (기본 0.005)                               1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
+    MAX_HISTORY_TURNS (기본 3)                                   멀티턴: 질문 재작성에 쓰는 최근 대화 턴 수
+    EXCLUDE_DOCS      (기본 비어 있음)                           검색에서 뺄 문서 파일명(쉼표로 여러 개). 예: welfare_ananti.pdf
     QDRANT_URL        (기본 http://localhost:6333)
     COLLECTION        (기본 welfare_chunks_bgem3)
 """
@@ -81,7 +83,7 @@ async def lifespan(app):
     from qdrant_client import QdrantClient
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_path = os.environ.get("MODEL_PATH", "ml/output/bge-m3-finetuned/final")
+    model_path = os.environ.get("MODEL_PATH", "ml/output/bge-m3-finetuned-v3/final")
     model = SentenceTransformer(model_path, device=device)
     model.max_seq_length = 512
     state["model"] = model
@@ -105,13 +107,15 @@ async def lifespan(app):
         state["llm"] = AutoModelForCausalLM.from_pretrained(llm_path, dtype=torch.bfloat16, device_map="cuda")
         state["llm_path"] = llm_path
 
-    state["prompt_version"] = os.environ.get("PROMPT_VERSION", "v1")
+    state["exclude_docs"] = [d.strip() for d in os.environ.get("EXCLUDE_DOCS", "").split(",") if d.strip()]
+    state["max_history_turns"] = int(os.environ.get("MAX_HISTORY_TURNS", "3"))
+    state["prompt_version"] = os.environ.get("PROMPT_VERSION", "v2")
     if state["prompt_version"] not in PROMPTS:
         raise ValueError(f"PROMPT_VERSION 은 {list(PROMPTS)} 중 하나여야 합니다.")
-    state["min_rerank_score"] = float(os.environ.get("MIN_RERANK_SCORE", "0.1"))
+    state["min_rerank_score"] = float(os.environ.get("MIN_RERANK_SCORE", "0.005"))
     state["client"] = QdrantClient(url=os.environ.get("QDRANT_URL", "http://localhost:6333"))
     state["collection"] = os.environ.get("COLLECTION", "welfare_chunks_bgem3")
-    print(f"[서버 준비 완료] 임베딩: {model_path} / 리랭커: {state['reranker_path']} / LLM: {state['llm_path']} / 장치: {device} / 컬렉션: {state['collection']} / 프롬프트: {state['prompt_version']}")
+    print(f"[서버 준비 완료] 임베딩: {model_path} / 리랭커: {state['reranker_path']} / LLM: {state['llm_path']} / 장치: {device} / 컬렉션: {state['collection']} / 프롬프트: {state['prompt_version']} / 제외 문서: {state['exclude_docs'] or '없음'}")
     yield
     state.clear()
 
@@ -130,10 +134,16 @@ class SearchRequest(BaseModel):
     candidates: int = Field(20, ge=1, le=50, description="리랭커에 넘길 후보 개수")
 
 
+class HistoryTurn(BaseModel):
+    question: str = Field("", description="이전 질문")
+    answer: str = Field("", description="이전 답변")
+
+
 class AnswerRequest(BaseModel):
     question: str = Field(min_length=1, description="직원의 질문")
     top_k: int = Field(3, ge=1, le=6, description="답변 근거로 LLM에 넘길 청크 개수")
     prompt_version: str | None = Field(None, description="프롬프트 버전(v1/v2). 안 정하면 서버 기본값(PROMPT_VERSION)")
+    history: list[HistoryTurn] | None = Field(None, description="멀티턴: 이전 대화(오래된 것부터). 있으면 질문을 독립된 질문으로 재작성한 뒤 검색")
 
 
 def embed(question: str):
@@ -144,8 +154,14 @@ def retrieve(question: str, top_k: int, rerank: bool, candidates: int):
     """M5 + M6 (+ M7): 질문 -> 상위 top_k개 청크(dict 목록)와 리랭크 사용 여부"""
     use_rerank = rerank and state.get("reranker") is not None
     limit = max(top_k, candidates) if use_rerank else top_k
+    kwargs = {}
+    if state.get("exclude_docs"):
+        from qdrant_client import models
+        kwargs["query_filter"] = models.Filter(
+            must_not=[models.FieldCondition(key="doc", match=models.MatchAny(any=state["exclude_docs"]))]
+        )
     points = state["client"].query_points(
-        state["collection"], query=embed(question), limit=limit, with_payload=True
+        state["collection"], query=embed(question), limit=limit, with_payload=True, **kwargs
     ).points
 
     rerank_scores = None
@@ -183,13 +199,40 @@ def build_messages(question: str, results: list, version: str = "v1"):
     return [{"role": "system", "content": PROMPTS[version]}, {"role": "user", "content": user}]
 
 
-def generate_text(messages: list) -> str:
+def generate_text(messages: list, max_new_tokens: int = 400) -> str:
     """LLM으로 답변 생성 (결정적 생성: 같은 입력이면 같은 답)"""
     tok, llm = state["tokenizer"], state["llm"]
     prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
     inputs = tok(prompt, return_tensors="pt").to(llm.device)
-    out = llm.generate(**inputs, max_new_tokens=400, do_sample=False)
+    out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     return tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+
+REWRITE_PROMPT = (
+    "당신은 대화형 사내 규정 챗봇의 질문 정리기입니다.\n"
+    "[대화 기록]을 보고 [마지막 질문]을 대화 기록 없이도 이해되는 독립된 한 문장 질문으로 바꿔 쓰세요.\n"
+    "규칙:\n"
+    "1. '그럼', '그건', '그 경우'처럼 생략되거나 대명사로 가리킨 대상은 대화 기록에서 찾아 채우세요.\n"
+    "2. 마지막 질문이 이미 독립적이거나 새로운 주제이면 그대로 쓰세요. 이전 대화의 주제를 억지로 붙이지 마세요.\n"
+    "3. 마지막 질문에 없는 사실이나 조건을 지어내지 마세요.\n"
+    "4. 바꾼 질문 한 문장만 출력하세요. 설명이나 따옴표는 쓰지 마세요."
+)
+
+
+def rewrite_question(question: str, history: list) -> str:
+    """멀티턴: 이전 대화를 보고 마지막 질문을 독립된 질문으로 바꾼다. 결과가 이상하면 원래 질문을 쓴다."""
+    convo = "\n".join(f"Q: {t.question.strip()}\nA: {t.answer.strip()[:300]}" for t in history)
+    user = f"[대화 기록]\n{convo}\n\n[마지막 질문]\n{question}\n\n[독립된 질문]"
+    raw = generate_text([{"role": "system", "content": REWRITE_PROMPT}, {"role": "user", "content": user}], max_new_tokens=100)
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    out = re.sub(r"^(독립된 질문|질문)\s*[:：]\s*", "", lines[0]).strip().strip('"\'“”‘’') if lines else ""
+    return out if 0 < len(out) <= 200 else question
+
+
+def clean_text(text: str) -> str:
+    """화면에 보여줄 조항 원문: 공백·줄바꿈을 정리하고 ①②③ 항 앞에서만 줄을 나눈다."""
+    t = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s*([①-⑩])", r"\n\1", t).strip()
 
 
 def split_citation(text: str, n_sources: int):
@@ -224,25 +267,31 @@ def search(req: SearchRequest):
 
 @app.post("/answer")
 def answer(req: AnswerRequest):
-    """M5~M8: 질문 -> 검색·재정렬 -> (근거 충분하면) LLM 답변 + 출처. 근거가 약하면 LLM 없이 '확인되지 않음'"""
+    """M5~M8: 질문 -> (멀티턴이면 질문 재작성) -> 검색·재정렬 -> (근거 충분하면) LLM 답변 + 출처. 근거가 약하면 LLM 없이 '확인되지 않음'"""
     if state.get("llm") is None:
         return {"error": "LLM이 꺼져 있습니다. USE_LLM=1 로 서버를 다시 켜세요."}
     version = req.prompt_version or state["prompt_version"]
     if version not in PROMPTS:
         raise HTTPException(status_code=400, detail=f"prompt_version 은 {list(PROMPTS)} 중 하나여야 합니다.")
-    results, used = retrieve(req.question, req.top_k, True, 20)
+
+    history = [t for t in (req.history or []) if t.question.strip()][-state.get("max_history_turns", 3):]
+    rewritten = rewrite_question(req.question, history) if history else None
+    question = rewritten or req.question
+
+    results, used = retrieve(question, req.top_k, True, 20)
     top_score = results[0].get("rerank_score") if results else None
+    base = {"question": req.question, "rewritten_question": rewritten, "top_score": top_score, "prompt_version": version}
 
     # 리랭커 1위 점수가 기준보다 낮으면 규정에 없는 질문으로 보고 LLM을 부르지 않는다
     if not results or (used and top_score < state["min_rerank_score"]):
-        return {"question": req.question, "answered": False, "answer": NO_ANSWER, "sources": [], "top_score": top_score, "prompt_version": version}
+        return {**base, "answered": False, "answer": NO_ANSWER, "sources": []}
 
-    text = generate_text(build_messages(req.question, results, version))
+    text = generate_text(build_messages(question, results, version))
     body, used_idx = split_citation(text, len(results))
     answered = "확인되지 않습니다" not in body
     sources = [
         {"doc": results[i]["doc"], "page": results[i]["page"], "heading": results[i]["heading"],
-         "rerank_score": results[i].get("rerank_score")}
+         "rerank_score": results[i].get("rerank_score"), "text": clean_text(results[i]["text"])}
         for i in used_idx
     ] if answered else []
-    return {"question": req.question, "answered": answered, "answer": body, "sources": sources, "top_score": top_score, "prompt_version": version}
+    return {**base, "answered": answered, "answer": body, "sources": sources}
