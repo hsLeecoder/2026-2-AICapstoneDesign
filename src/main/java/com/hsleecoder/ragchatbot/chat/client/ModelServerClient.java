@@ -28,24 +28,29 @@ public class ModelServerClient {
     }
 
     /** 질문을 보내고 답변과 출처를 받는다. 연결 실패 시 예외가 발생한다. */
-    public ModelAnswer answer(String question) {
+    public ModelAnswer answer(String question, List<HistoryTurn> history) {
         return webClient.post()
                 .uri("/answer")
-                .bodyValue(new AnswerRequest(question, props.topK()))
+                .bodyValue(new AnswerRequest(question, props.topK(), history))
                 .retrieve()
                 .bodyToMono(ModelAnswer.class)
                 .block(Duration.ofSeconds(props.timeoutSeconds()));
     }
 
-    /** /answer 요청 본문. 모델 서버의 필드 이름(question, top_k)에 맞춘다. */
-    public record AnswerRequest(String question, @JsonProperty("top_k") int topK) {
+    /** /answer 요청 본문. 모델 서버의 필드 이름(question, top_k, history)에 맞춘다. */
+    public record AnswerRequest(String question, @JsonProperty("top_k") int topK, List<HistoryTurn> history) {
+    }
+
+    /** 멀티턴에서 모델 서버에 보내는 이전 대화 한 턴. */
+    public record HistoryTurn(String question, String answer) {
     }
 
     /** /answer 응답. 모르는 필드는 무시한다. */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ModelAnswer(
             @JsonAlias({"response", "text", "output"}) String answer,
-            List<ModelSource> sources
+            List<ModelSource> sources,
+            @JsonProperty("rewritten_question") String rewrittenQuestion
     ) {
     }
 
@@ -57,7 +62,8 @@ public class ModelServerClient {
             Integer page,
             String heading,
             @JsonProperty("rerank_score") Double rerankScore,
-            Double score
+            Double score,
+            String text
     ) {
     }
 }

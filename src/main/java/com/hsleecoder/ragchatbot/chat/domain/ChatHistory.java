@@ -45,12 +45,23 @@ public class ChatHistory extends BaseTimeEntity {
     @Column(length = 255)
     private String referencedPages;
 
+    /** 화면을 열 때 만든 대화 묶음 번호. 같은 대화의 질문들을 묶어 분석할 때 쓴다. */
+    @Column(length = 36)
+    private String conversationId;
+
+    /** 멀티턴일 때 모델 서버가 이전 대화를 반영해 다시 쓴 질문. 멀티턴이 아니면 null. */
+    @Column(columnDefinition = "TEXT")
+    private String rewrittenQuestion;
+
     @Builder
     private ChatHistory(String question, String answer,
-                        Document referencedDocument, String referencedPages) {
+                        Document referencedDocument, String referencedPages,
+                        String conversationId, String rewrittenQuestion) {
         this.question = question;
         this.answer = answer;
         this.referencedDocument = referencedDocument;
         this.referencedPages = referencedPages;
+        this.conversationId = conversationId;
+        this.rewrittenQuestion = rewrittenQuestion;
     }
 }

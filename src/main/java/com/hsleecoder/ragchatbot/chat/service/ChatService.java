@@ -1,6 +1,7 @@
 package com.hsleecoder.ragchatbot.chat.service;
 
 import com.hsleecoder.ragchatbot.chat.client.ModelServerClient;
+import com.hsleecoder.ragchatbot.chat.client.ModelServerClient.HistoryTurn;
 import com.hsleecoder.ragchatbot.chat.client.ModelServerClient.ModelAnswer;
 import com.hsleecoder.ragchatbot.chat.client.ModelServerClient.ModelSource;
 import com.hsleecoder.ragchatbot.chat.domain.ChatHistory;
@@ -30,6 +31,10 @@ public class ChatService {
     private final ChatHistoryRepository chatHistoryRepository;
     private final ModelServerClient modelServerClient;
 
+    /** 모델 서버에 보내는 이전 대화의 최대 턴 수와, 턴마다 답변을 자르는 길이. */
+    private static final int MAX_HISTORY_TURNS = 3;
+    private static final int MAX_HISTORY_ANSWER_CHARS = 300;
+
     /** 질문을 모델 서버에 전달해 답변을 받고, 이력을 저장한다. */
     public ChatResponse ask(ChatRequest request) {
         String question = request.question();
@@ -39,7 +44,7 @@ public class ChatService {
 
         ModelAnswer result;
         try {
-            result = modelServerClient.answer(question);
+            result = modelServerClient.answer(question, toHistory(request.history()));
         } catch (Exception e) {
             log.error("모델 서버 호출 실패", e);
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
@@ -60,6 +65,8 @@ public class ChatService {
                 .question(question)
                 .answer(result.answer())
                 .referencedPages(pages.isBlank() ? null : pages)
+                .conversationId(truncate(request.conversationId(), 36))
+                .rewrittenQuestion(result.rewrittenQuestion())
                 .build();
         chatHistoryRepository.save(history);
 
@@ -77,7 +84,27 @@ public class ChatService {
                         s.page() == null ? 0 : s.page(),
                         s.heading(),
                         s.rerankScore() != null ? s.rerankScore()
-                                : (s.score() == null ? 0.0 : s.score())))
+                                : (s.score() == null ? 0.0 : s.score()),
+                        s.text()))
                 .toList();
+    }
+
+    /** 화면이 보낸 이전 대화를 최근 몇 턴만, 답변은 잘라서 모델 서버용으로 바꾼다. */
+    private List<HistoryTurn> toHistory(List<ChatRequest.Turn> turns) {
+        if (turns == null) {
+            return List.of();
+        }
+        List<HistoryTurn> valid = turns.stream()
+                .filter(t -> t != null && t.question() != null && !t.question().isBlank())
+                .map(t -> new HistoryTurn(t.question(), truncate(t.answer() == null ? "" : t.answer(), MAX_HISTORY_ANSWER_CHARS)))
+                .toList();
+        return valid.subList(Math.max(0, valid.size() - MAX_HISTORY_TURNS), valid.size());
+    }
+
+    private String truncate(String value, int max) {
+        if (value == null) {
+            return null;
+        }
+        return value.length() <= max ? value : value.substring(0, max);
     }
 }
