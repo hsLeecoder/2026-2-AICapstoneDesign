@@ -15,14 +15,14 @@
     box-shadow:0 8px 28px rgba(0,0,0,.2); }
   #panel.open { display:flex; }
   #panel.mode-widget { right:24px; bottom:92px; width:360px; height:520px; max-height:calc(100vh - 120px); border-radius:14px; }
-  #panel.mode-side { right:0; top:0; bottom:0; width:480px; max-width:100vw; border-radius:0; }
-  #panel.mode-full { inset:0; border-radius:0; }
+  #panel.mode-side { right:0; top:0; bottom:0; width:480px; max-width:100vw; border-radius:0; border:0; border-left:1px solid var(--line); }
+  #panel.mode-full { inset:0; border-radius:0; border:0; }
   .head { background:var(--navy); color:#fff; padding:12px 14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   .head .title { flex:1; font-weight:bold; white-space:nowrap; min-width:0; }
-  #panel.mode-widget .head .title small { display:none; }
+  #panel.mode-widget .head .title small, #panel.mode-side .head .title small { display:none; }
   #panel.mode-widget .seg { order:3; width:100%; }
   #panel.mode-widget .seg button { flex:1; }
-  .head .title small { display:block; font-weight:normal; opacity:.75; margin-top:2px; font-size:12px; }
+  .head .title small { white-space:normal; display:block; font-weight:normal; opacity:.75; margin-top:2px; font-size:12px; }
   .seg { display:flex; border:1px solid rgba(255,255,255,.4); border-radius:8px; overflow:hidden; }
   .seg button, .hbtn { background:transparent; color:#fff; border:0; padding:5px 9px; font-size:12px; cursor:pointer; font-family:inherit; }
   .seg button.on { background:rgba(255,255,255,.28); font-weight:bold; }
