@@ -12,7 +12,7 @@
     USE_RERANKER      (기본 1, 끄려면 0)
     USE_LLM           (기본 0, 답변 생성을 쓰려면 1)
     LLM_PATH          (기본 Qwen/Qwen3-8B)                       답변 생성 LLM (GPU 메모리가 모자라면 Qwen/Qwen3-4B)
-    PROMPT_VERSION    (기본 v2)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치). 요청마다 prompt_version 으로 바꿀 수도 있음
+    PROMPT_VERSION    (기본 v3)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치). 요청마다 prompt_version 으로 바꿀 수도 있음
     MIN_RERANK_SCORE  (기본 0.005)                               1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
     MAX_HISTORY_TURNS (기본 3)                                   멀티턴: 질문 재작성에 쓰는 최근 대화 턴 수
     EXCLUDE_DOCS      (기본 비어 있음)                           검색에서 뺄 문서 파일명(쉼표로 여러 개). 예: welfare_ananti.pdf
@@ -123,7 +123,7 @@ async def lifespan(app):
 
     state["exclude_docs"] = [d.strip() for d in os.environ.get("EXCLUDE_DOCS", "").split(",") if d.strip()]
     state["max_history_turns"] = int(os.environ.get("MAX_HISTORY_TURNS", "3"))
-    state["prompt_version"] = os.environ.get("PROMPT_VERSION", "v2")
+    state["prompt_version"] = os.environ.get("PROMPT_VERSION", "v3")
     if state["prompt_version"] not in PROMPTS:
         raise ValueError(f"PROMPT_VERSION 은 {list(PROMPTS)} 중 하나여야 합니다.")
     state["min_rerank_score"] = float(os.environ.get("MIN_RERANK_SCORE", "0.005"))
