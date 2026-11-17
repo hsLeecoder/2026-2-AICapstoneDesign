@@ -12,7 +12,7 @@
     USE_RERANKER      (기본 1, 끄려면 0)
     USE_LLM           (기본 0, 답변 생성을 쓰려면 1)
     LLM_PATH          (기본 Qwen/Qwen3-8B)                       답변 생성 LLM (GPU 메모리가 모자라면 Qwen/Qwen3-4B)
-    PROMPT_VERSION    (기본 v2)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화). 요청마다 prompt_version 으로 바꿀 수도 있음
+    PROMPT_VERSION    (기본 v2)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치). 요청마다 prompt_version 으로 바꿀 수도 있음
     MIN_RERANK_SCORE  (기본 0.005)                               1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
     MAX_HISTORY_TURNS (기본 3)                                   멀티턴: 질문 재작성에 쓰는 최근 대화 턴 수
     EXCLUDE_DOCS      (기본 비어 있음)                           검색에서 뺄 문서 파일명(쉼표로 여러 개). 예: welfare_ananti.pdf
@@ -67,12 +67,26 @@ SYSTEM_PROMPT_V2 = (
     "8. 답변 맨 마지막 줄에 실제로 사용한 근거 번호를 [근거: 1, 2] 형식으로 적으세요."
 )
 
-PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2}
+# v3: v2 에 말투와 질문 대상 일치 규칙을 더했다. (1) 존댓말로 일관되게, 조문 말투를 풀어 쓰기,
+# (2) 예/아니오 질문이 아니면 '네,'로 시작하지 않기, (3) 근거가 다루는 제도가 질문이 묻는 제도와 같은지 먼저 확인하기.
+SYSTEM_PROMPT_V3 = SYSTEM_PROMPT_V2.replace(
+    "7. 한국어로 간결하게(최대 6문장) 답하세요.\n"
+    "8. 답변 맨 마지막 줄에 실제로 사용한 근거 번호를 [근거: 1, 2] 형식으로 적으세요.",
+    "7. 근거가 다루는 제도(예: 연차, 병가, 경조사휴가)와 질문이 묻는 제도가 같은지 먼저 확인하세요. 다르면 근거의 내용을 질문 대상에 적용하지 말고 '규정에 명시되어 있지 않습니다'라고 쓰세요.\n"
+    "8. 항상 존댓말(~합니다, ~입니다, ~해요)로 답하세요. 근거의 '~한다', '~준다' 같은 조문 말투와 '제1항 규정에 따른', '계속 근로연수' 같은 표현을 그대로 옮기지 말고 직원이 이해하기 쉬운 말로 풀어 쓰세요. 단 숫자와 조건은 그대로 유지하세요.\n"
+    "9. 질문이 예/아니오를 묻는 형태가 아니면 '네,'로 시작하지 마세요.\n"
+    "10. 한국어로 간결하게(최대 6문장) 답하세요.\n"
+    "11. 답변 맨 마지막 줄에 실제로 사용한 근거 번호를 [근거: 1, 2] 형식으로 적으세요.",
+)
+assert SYSTEM_PROMPT_V3 != SYSTEM_PROMPT_V2
+
+PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2, "v3": SYSTEM_PROMPT_V3}
 
 # v2 에서 근거 머리말에 쓰는 문서 이름표 (모르는 문서는 파일 이름 그대로 표시)
 DOC_LABELS = {
     "welfare_ananti.pdf": "복리후생규정(아난티)",
     "workrules_goyongnodong.pdf": "취업규칙(고용노동부 표준)",
+    "welfare_goyongnodong.pdf": "선진기업복지제도 안내(노동부·근로복지공단)",
 }
 
 
@@ -191,7 +205,7 @@ def retrieve(question: str, top_k: int, rerank: bool, candidates: int):
 
 def build_messages(question: str, results: list, version: str = "v1"):
     """M8 프롬프트: 규정 근거와 질문을 LLM 대화 형식으로 만든다"""
-    if version == "v2":
+    if version in ("v2", "v3"):
         blocks = [f"[근거 {n}] ({DOC_LABELS.get(r['doc'], r['doc'])} p.{r['page']})\n{r['text']}" for n, r in enumerate(results, start=1)]
     else:
         blocks = [f"[근거 {n}] ({r['doc']} p.{r['page']})\n{r['text']}" for n, r in enumerate(results, start=1)]
@@ -219,11 +233,20 @@ REWRITE_PROMPT = (
 )
 
 
-def rewrite_question(question: str, history: list) -> str:
+REWRITE_PROMPT_V3 = REWRITE_PROMPT.replace(
+    "2. 마지막 질문이 이미 독립적이거나",
+    "2. 생략된 대상은 가장 최근 질문과 답변에서 먼저 찾으세요. 오래된 대화보다 바로 앞 대화가 더 중요합니다.\n"
+    "   마지막 질문이 이미 독립적이거나",
+)
+assert REWRITE_PROMPT_V3 != REWRITE_PROMPT
+REWRITE_PROMPTS = {"v1": REWRITE_PROMPT, "v2": REWRITE_PROMPT, "v3": REWRITE_PROMPT_V3}
+
+
+def rewrite_question(question: str, history: list, version: str = "v2") -> str:
     """멀티턴: 이전 대화를 보고 마지막 질문을 독립된 질문으로 바꾼다. 결과가 이상하면 원래 질문을 쓴다."""
     convo = "\n".join(f"Q: {t.question.strip()}\nA: {t.answer.strip()[:300]}" for t in history)
     user = f"[대화 기록]\n{convo}\n\n[마지막 질문]\n{question}\n\n[독립된 질문]"
-    raw = generate_text([{"role": "system", "content": REWRITE_PROMPT}, {"role": "user", "content": user}], max_new_tokens=100)
+    raw = generate_text([{"role": "system", "content": REWRITE_PROMPTS[version]}, {"role": "user", "content": user}], max_new_tokens=100)
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     out = re.sub(r"^(독립된 질문|질문)\s*[:：]\s*", "", lines[0]).strip().strip('"\'“”‘’') if lines else ""
     return out if 0 < len(out) <= 200 else question
@@ -275,7 +298,7 @@ def answer(req: AnswerRequest):
         raise HTTPException(status_code=400, detail=f"prompt_version 은 {list(PROMPTS)} 중 하나여야 합니다.")
 
     history = [t for t in (req.history or []) if t.question.strip()][-state.get("max_history_turns", 3):]
-    rewritten = rewrite_question(req.question, history) if history else None
+    rewritten = rewrite_question(req.question, history, version) if history else None
     question = rewritten or req.question
 
     results, used = retrieve(question, req.top_k, True, 20)
