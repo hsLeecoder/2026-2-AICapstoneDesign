@@ -181,5 +181,85 @@
   welcome();
 })();
 </script>
+<script>
+/* 접속 코드 확인: /api/ 로 가는 요청에 접속 코드를 자동으로 붙이고, 없거나 틀리면 입력 창을 띄운다 */
+(function () {
+  var KEY = 'accessCode';
+  var memCode = '';
+  var origFetch = window.fetch.bind(window);
+  var gatePromise = null;
+
+  function getCode() { try { return sessionStorage.getItem(KEY) || memCode; } catch (e) { return memCode; } }
+  function setCode(c) { memCode = c; try { sessionStorage.setItem(KEY, c); } catch (e) {} }
+  function clearCode() { memCode = ''; try { sessionStorage.removeItem(KEY); } catch (e) {} }
+
+  function style(node, css) { node.style.cssText = css; return node; }
+
+  function askCode(message) {
+    if (gatePromise) return gatePromise;
+    gatePromise = new Promise(function (resolve, reject) {
+      var overlay = style(document.createElement('div'),
+        'position:fixed;inset:0;z-index:2147483647;background:rgba(15,23,42,.55);display:flex;align-items:center;justify-content:center;padding:16px;');
+      overlay.id = 'access-gate';
+      var card = style(document.createElement('form'),
+        'background:#fff;border-radius:14px;padding:22px;width:100%;max-width:340px;box-shadow:0 10px 40px rgba(0,0,0,.3);display:flex;flex-direction:column;gap:12px;font-family:inherit;');
+      var title = style(document.createElement('div'), 'font-weight:700;font-size:16px;color:#1a2a56;');
+      title.textContent = '접속 코드를 입력하세요';
+      var desc = style(document.createElement('div'), 'font-size:13px;color:#555;line-height:1.5;');
+      desc.textContent = '안내받은 접속 코드를 입력해야 챗봇을 사용할 수 있습니다.';
+      var input = style(document.createElement('input'),
+        'border:1px solid #cbd5e1;border-radius:8px;padding:10px 12px;font-size:15px;outline:none;');
+      input.type = 'password';
+      input.autocomplete = 'off';
+      input.placeholder = '접속 코드';
+      var err = style(document.createElement('div'), 'font-size:13px;color:#c62828;min-height:18px;');
+      err.textContent = message || '';
+      var row = style(document.createElement('div'), 'display:flex;gap:8px;justify-content:flex-end;');
+      var cancel = style(document.createElement('button'),
+        'border:1px solid #cbd5e1;background:#fff;color:#334155;border-radius:8px;padding:8px 14px;font-size:14px;cursor:pointer;');
+      cancel.type = 'button';
+      cancel.textContent = '취소';
+      var ok = style(document.createElement('button'),
+        'border:0;background:#1a2a56;color:#fff;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer;');
+      ok.type = 'submit';
+      ok.textContent = '확인';
+
+      function close() { overlay.remove(); gatePromise = null; }
+      card.onsubmit = function (e) {
+        e.preventDefault();
+        var v = input.value.trim();
+        if (!v) { err.textContent = '코드를 입력해 주세요.'; return; }
+        setCode(v);
+        close();
+        resolve(v);
+      };
+      cancel.onclick = function () { close(); reject(new Error('cancelled')); };
+
+      row.appendChild(cancel); row.appendChild(ok);
+      card.appendChild(title); card.appendChild(desc); card.appendChild(input); card.appendChild(err); card.appendChild(row);
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+      input.focus();
+    });
+    return gatePromise;
+  }
+
+  window.fetch = async function (input, init) {
+    var url = (typeof input === 'string') ? input : ((input && input.url) || '');
+    if (url.indexOf('/api/') !== 0) return origFetch(input, init);
+    var msg = '';
+    for (;;) {
+      var code = getCode();
+      if (!code) code = await askCode(msg);
+      var opts = Object.assign({}, init || {});
+      opts.headers = Object.assign({}, opts.headers || {}, { 'X-Access-Code': code });
+      var res = await origFetch(input, opts);
+      if (res.status !== 401) return res;
+      clearCode();
+      msg = '접속 코드가 올바르지 않습니다. 다시 입력해 주세요.';
+    }
+  };
+})();
+</script>
 </body>
 </html>
