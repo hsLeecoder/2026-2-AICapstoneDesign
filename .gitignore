@@ -61,3 +61,7 @@ ml/data/chunks/
 __pycache__/
 
 ml/data/eval/
+
+# eval and uploads
+/eval/
+/uploads/
