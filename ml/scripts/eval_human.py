@@ -67,7 +67,9 @@ def main():
     ap.add_argument("--out", default="ml/data/eval/answers.jsonl")
     ap.add_argument("--answer-top-k", type=int, default=None, help="/answer 에 넘길 근거 개수 (안 정하면 서버 기본값)")
     ap.add_argument("--no-history", action="store_true", help="멀티턴 질문의 이전 대화를 보내지 않고 평가(멀티턴 효과 비교용)")
-    ap.add_argument("--prompt-version", default=None, help="/answer 프롬프트 버전 (v1/v2, 안 정하면 서버 기본값)")
+    ap.add_argument("--prompt-version", default=None, help="/answer 프롬프트 버전 (v1~v4, 안 정하면 서버 기본값)")
+    ap.add_argument("--verify-numbers", choices=["on", "off"], default=None, help="숫자 조건 누락 검증 후 1회 재생성 (안 정하면 서버 기본값)")
+    ap.add_argument("--include-ananti", action="store_true", help="아난티 복리후생규정도 검색에 포함(서버의 EXCLUDE_DOCS 무시)")
     a = ap.parse_args()
 
     chunks = {}
@@ -86,6 +88,16 @@ def main():
         a_extra["prompt_version"] = a.prompt_version
         if "prompt_version" not in ap_:
             print("[경고] 서버가 prompt_version 을 받지 않습니다. search_server.py 를 최신으로 바꿨는지 확인하세요.")
+    if a.verify_numbers is not None:
+        a_extra["verify_numbers"] = (a.verify_numbers == "on")
+        if "verify_numbers" not in ap_:
+            print("[경고] 서버가 verify_numbers 를 받지 않습니다. search_server.py 를 최신으로 바꿨는지 확인하세요.")
+    if a.include_ananti:
+        a_extra["exclude_docs"] = []
+        s_extra["exclude_docs"] = []
+        if "exclude_docs" not in ap_:
+            print("[경고] 서버가 exclude_docs 를 받지 않습니다. search_server.py 를 최신으로 바꿨는지 확인하세요.")
+    print(f"설정: 프롬프트={a.prompt_version or '서버 기본값'} / 숫자검증={a.verify_numbers or '서버 기본값'} / 아난티={'포함' if a.include_ananti else '서버 설정대로(기본 제외)'} / 근거개수={a.answer_top_k or '서버 기본값'}")
 
     out, t0 = [], time.time()
     for q in qs:
@@ -108,6 +120,9 @@ def main():
         out.append({
             "id": q["id"], "question": q["question"], "type": q["type"],
             "gold_chunks": gold, "key_facts": facts,
+            "gold_doc": (chunks[gold[0]]["doc"] if gold and gold[0] in chunks else None),
+            "verify": (ar.get("verify") if isinstance(ar, dict) else None),
+            "repaired": bool((ar.get("verify") or {}).get("repaired")) if isinstance(ar, dict) else None,
             "ref_chunks": q.get("ref_chunks", []), "expected": q.get("expected", ""), "source": q.get("source", ""),
             "top_score": ar.get("top_score") if isinstance(ar, dict) else None,
             "answered": ar.get("answered") if isinstance(ar, dict) else None,
@@ -147,6 +162,27 @@ def main():
     if multi:
         print(f"멀티턴 질문 {len(multi)}개 (이전 대화 {'전송' if multi[0]['history_sent'] else '미전송'}) 중 '확인되지 않습니다'로 거절: {sum(1 for r in multi if r['refused'])}개")
         for r in multi: print(f"  {r['id']} {r['question']} → 재작성: {r['rewritten_question']}")
+    secs = [r["answer_sec"] for r in out if not r["refused"]]
+    if secs:
+        print(f"평균 응답 시간(답변한 질문): {sum(secs)/len(secs):.1f}초 (가장 느린 질문 {max(secs):.1f}초)")
+    rep = [r["id"] for r in out if r.get("repaired")]
+    if any(r.get("verify") for r in out):
+        print(f"숫자 조건 누락으로 다시 생성한 질문: {len(rep)}개 {rep}")
+
+    by_doc = {}
+    for r in ins:
+        by_doc.setdefault(r.get("gold_doc") or "(모름)", []).append(r)
+    if len(by_doc) > 1:
+        print("\n----- 정답 문서별 (규정 질문) -----")
+        for doc, rows in sorted(by_doc.items()):
+            k = len(rows)
+            r1 = sum(1 for r in rows if r["search_rank"] and r["search_rank"] <= 1)
+            hit = sum(1 for r in rows if r["source_hit"])
+            ref = sum(1 for r in rows if r["refused"])
+            f2 = [r["key_fact_ratio"] for r in rows if not r["refused"] and r["key_fact_ratio"] is not None]
+            fact = f"{sum(f2)/len(f2):.2f}" if f2 else "-"
+            print(f"  {doc}: {k}문항 | Recall@1 {r1}/{k} | 출처에 정답 포함 {hit}/{k} | 거절 {ref}/{k} | 핵심 사실 {fact}")
+
     print(f"총 소요 {time.time()-t0:.0f}초 → {a.out}")
 
 if __name__ == "__main__":

@@ -12,10 +12,11 @@
     USE_RERANKER      (기본 1, 끄려면 0)
     USE_LLM           (기본 0, 답변 생성을 쓰려면 1)
     LLM_PATH          (기본 Qwen/Qwen3-8B)                       답변 생성 LLM (GPU 메모리가 모자라면 Qwen/Qwen3-4B)
-    PROMPT_VERSION    (기본 v3)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치). 요청마다 prompt_version 으로 바꿀 수도 있음
+    PROMPT_VERSION    (기본 v3)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존). 요청마다 prompt_version 으로 바꿀 수도 있음
+    VERIFY_NUMBERS    (기본 0, 켜려면 1)                         답변이 근거의 숫자 조건을 빠뜨리면 한 번 다시 생성. 요청마다 verify_numbers 로 바꿀 수도 있음
     MIN_RERANK_SCORE  (기본 0.005)                               1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
     MAX_HISTORY_TURNS (기본 3)                                   멀티턴: 질문 재작성에 쓰는 최근 대화 턴 수
-    EXCLUDE_DOCS      (기본 비어 있음)                           검색에서 뺄 문서 파일명(쉼표로 여러 개). 예: welfare_ananti.pdf
+    EXCLUDE_DOCS      (기본 비어 있음)                           검색에서 뺄 문서 파일명(쉼표로 여러 개). 예: welfare_ananti.pdf. 요청마다 exclude_docs 로 바꿀 수도 있음(빈 목록이면 제외 없음)
     QDRANT_URL        (기본 http://localhost:6333)
     COLLECTION        (기본 welfare_chunks_bgem3)
 """
@@ -80,7 +81,28 @@ SYSTEM_PROMPT_V3 = SYSTEM_PROMPT_V2.replace(
 )
 assert SYSTEM_PROMPT_V3 != SYSTEM_PROMPT_V2
 
-PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2, "v3": SYSTEM_PROMPT_V3}
+# v4: v3 에서 조건(숫자에 붙은 수식어)이 사라지는 문제를 막는다.
+# v3 의 "쉬운 말로 풀어 쓰기"와 "간결하게"가 "조건을 그대로 쓰기"를 눌러서
+# '매 2년에 대하여 1일 가산' 같은 주기 조건이 답변에서 빠지는 일이 있었다.
+# 그래서 (1) 숫자에 붙은 수식어를 반드시 남기게 하고, (2) 가산 규정은 '얼마나/얼마마다/상한'을
+# 함께 쓰도록 좋은 예·나쁜 예를 주고, (3) 조건을 쓸 자리를 위해 문장 수 제한을 7문장으로 늘렸다.
+SYSTEM_PROMPT_V4 = SYSTEM_PROMPT_V3.replace(
+    "2. 기간·일수·금액·비율 같은 숫자와 조건은 근거 문장 그대로 정확히 쓰세요. 일부만 옮기거나 바꾸지 마세요.\n",
+    "2. 기간·일수·금액·비율 같은 숫자와 조건은 근거 문장 그대로 정확히 쓰세요. 일부만 옮기거나 바꾸지 마세요.\n"
+    "2-1. 숫자에 붙은 수식어('매 2년에 대하여', '3년 이상', '1개월 개근 시', '80퍼센트 이상 출근', '25일을 한도로')는 하나도 빼지 마세요. "
+    "쉬운 말로 풀어 쓸 때도 이 수식어는 반드시 남기세요.\n"
+    "2-2. 가산·추가·증가·한도 규정은 (1) 얼마나 늘어나는지 (2) 무엇마다(몇 년마다) 늘어나는지 (3) 상한이 얼마인지를 모두 함께 쓰세요. "
+    "셋 중 근거에 적혀 있는 것은 하나도 빠뜨리면 안 됩니다.\n"
+    "   나쁜 예: '3년 이상 근속하면 1일씩 가산되어 최대 25일입니다.' → '매 2년마다'가 빠졌습니다.\n"
+    "   좋은 예: '3년 이상 근속하면 최초 1년을 넘는 근속기간 매 2년마다 1일이 더해지고, 가산을 포함해 최대 25일까지입니다.'\n",
+).replace(
+    "10. 한국어로 간결하게(최대 6문장) 답하세요.\n",
+    "10. 한국어로 간결하게(최대 7문장) 답하세요. 단 2-1·2-2의 조건을 모두 쓰기 위해 필요하면 문장을 더 써도 됩니다.\n",
+)
+assert SYSTEM_PROMPT_V4 != SYSTEM_PROMPT_V3 and "매 2년마다" in SYSTEM_PROMPT_V4
+assert "최대 7문장" in SYSTEM_PROMPT_V4
+
+PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2, "v3": SYSTEM_PROMPT_V3, "v4": SYSTEM_PROMPT_V4}
 
 # v2 에서 근거 머리말에 쓰는 문서 이름표 (모르는 문서는 파일 이름 그대로 표시)
 DOC_LABELS = {
@@ -123,13 +145,14 @@ async def lifespan(app):
 
     state["exclude_docs"] = [d.strip() for d in os.environ.get("EXCLUDE_DOCS", "").split(",") if d.strip()]
     state["max_history_turns"] = int(os.environ.get("MAX_HISTORY_TURNS", "3"))
+    state["verify_numbers"] = os.environ.get("VERIFY_NUMBERS", "0") == "1"
     state["prompt_version"] = os.environ.get("PROMPT_VERSION", "v3")
     if state["prompt_version"] not in PROMPTS:
         raise ValueError(f"PROMPT_VERSION 은 {list(PROMPTS)} 중 하나여야 합니다.")
     state["min_rerank_score"] = float(os.environ.get("MIN_RERANK_SCORE", "0.005"))
     state["client"] = QdrantClient(url=os.environ.get("QDRANT_URL", "http://localhost:6333"))
     state["collection"] = os.environ.get("COLLECTION", "welfare_chunks_bgem3")
-    print(f"[서버 준비 완료] 임베딩: {model_path} / 리랭커: {state['reranker_path']} / LLM: {state['llm_path']} / 장치: {device} / 컬렉션: {state['collection']} / 프롬프트: {state['prompt_version']} / 제외 문서: {state['exclude_docs'] or '없음'}")
+    print(f"[서버 준비 완료] 임베딩: {model_path} / 리랭커: {state['reranker_path']} / LLM: {state['llm_path']} / 장치: {device} / 컬렉션: {state['collection']} / 프롬프트: {state['prompt_version']} / 숫자 검증: {'켜짐' if state['verify_numbers'] else '꺼짐'} / 제외 문서: {state['exclude_docs'] or '없음'}")
     yield
     state.clear()
 
@@ -146,6 +169,7 @@ class SearchRequest(BaseModel):
     top_k: int = Field(5, ge=1, le=20, description="돌려줄 청크 개수")
     rerank: bool = Field(True, description="리랭커로 재정렬할지 (서버에 리랭커가 없으면 무시)")
     candidates: int = Field(20, ge=1, le=50, description="리랭커에 넘길 후보 개수")
+    exclude_docs: list[str] | None = Field(None, description="검색에서 뺄 문서(안 정하면 서버 기본값, 빈 목록이면 제외 없음)")
 
 
 class HistoryTurn(BaseModel):
@@ -156,7 +180,9 @@ class HistoryTurn(BaseModel):
 class AnswerRequest(BaseModel):
     question: str = Field(min_length=1, description="직원의 질문")
     top_k: int = Field(3, ge=1, le=6, description="답변 근거로 LLM에 넘길 청크 개수")
-    prompt_version: str | None = Field(None, description="프롬프트 버전(v1/v2). 안 정하면 서버 기본값(PROMPT_VERSION)")
+    prompt_version: str | None = Field(None, description="프롬프트 버전(v1~v4). 안 정하면 서버 기본값(PROMPT_VERSION)")
+    verify_numbers: bool | None = Field(None, description="숫자 조건 누락 검증 후 1회 재생성. 안 정하면 서버 기본값(VERIFY_NUMBERS)")
+    exclude_docs: list[str] | None = Field(None, description="검색에서 뺄 문서(안 정하면 서버 기본값, 빈 목록이면 제외 없음)")
     history: list[HistoryTurn] | None = Field(None, description="멀티턴: 이전 대화(오래된 것부터). 있으면 질문을 독립된 질문으로 재작성한 뒤 검색")
 
 
@@ -164,15 +190,17 @@ def embed(question: str):
     return state["model"].encode([question], normalize_embeddings=True)[0].tolist()
 
 
-def retrieve(question: str, top_k: int, rerank: bool, candidates: int):
-    """M5 + M6 (+ M7): 질문 -> 상위 top_k개 청크(dict 목록)와 리랭크 사용 여부"""
+def retrieve(question: str, top_k: int, rerank: bool, candidates: int, exclude: list | None = None):
+    """M5 + M6 (+ M7): 질문 -> 상위 top_k개 청크(dict 목록)와 리랭크 사용 여부.
+    exclude 가 None 이면 서버 기본값(EXCLUDE_DOCS)을 쓰고, 빈 목록이면 아무 문서도 빼지 않는다."""
     use_rerank = rerank and state.get("reranker") is not None
     limit = max(top_k, candidates) if use_rerank else top_k
+    exclude = state.get("exclude_docs") if exclude is None else exclude
     kwargs = {}
-    if state.get("exclude_docs"):
+    if exclude:
         from qdrant_client import models
         kwargs["query_filter"] = models.Filter(
-            must_not=[models.FieldCondition(key="doc", match=models.MatchAny(any=state["exclude_docs"]))]
+            must_not=[models.FieldCondition(key="doc", match=models.MatchAny(any=exclude))]
         )
     points = state["client"].query_points(
         state["collection"], query=embed(question), limit=limit, with_payload=True, **kwargs
@@ -258,6 +286,52 @@ def clean_text(text: str) -> str:
     return re.sub(r"\s*([①-⑩])", r"\n\1", t).strip()
 
 
+# ---- 숫자 조건 누락 검증(C) ----------------------------------------------
+# 프롬프트만으로는 '매 2년에 대하여' 같은 조건이 빠지는 것을 완전히 막지 못했다.
+# 그래서 답변을 만든 뒤 규칙으로 한 번 더 확인한다:
+#   1) 근거 청크를 문장 단위로 쪼갠다
+#   2) 답변이 쓴 숫자가 들어 있는 문장을 '답변이 실제로 쓴 근거 문장'으로 본다
+#   3) 그 문장 안에 있는데 답변에는 없는 숫자 표현을 '누락'으로 잡는다
+#   4) 누락이 있으면 그 목록을 알려주고 딱 한 번 다시 생성한다
+NUM_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:개년|년|개월|주일|주|일|시간|분|회|차|명|배|퍼센트|%|만원|천원|원|개)")
+
+def num_tokens(text: str) -> set:
+    """숫자+단위 표현만 뽑는다. '퍼센트'는 '%'로, 공백은 지워서 '2 년'과 '2년'을 같게 본다."""
+    return set(NUM_RE.findall((text or "").replace("퍼센트", "%").replace(" ", "")))
+
+def split_sentences(text: str) -> list:
+    """근거 청크를 문장으로 쪼갠다. 조문은 ①②③ 항 단위가 한 문장 역할을 한다."""
+    t = re.sub(r"\s+", " ", text or "")
+    parts = re.split(r"(?=[①-⑩])|(?<=[.])\s", t)
+    return [x.strip() for x in parts if x.strip()]
+
+def missing_numbers(answer: str, results: list, used_idx: list, limit: int = 5) -> list:
+    """답변이 근거의 숫자 조건을 빠뜨렸으면 그 표현들을 돌려준다."""
+    ans = num_tokens(answer)
+    if not ans:
+        return []
+    missing = []
+    for i in used_idx:
+        if i >= len(results):
+            continue
+        for sent in split_sentences(results[i]["text"]):
+            toks = num_tokens(sent)
+            if not toks or not (toks & ans):   # 답변이 이 문장을 쓰지 않았다고 보고 넘어간다
+                continue
+            for t in toks - ans:
+                if t not in missing:
+                    missing.append(t)
+    return missing[:limit]
+
+REPAIR_HINT = (
+    "방금 답변에 근거의 숫자 조건이 빠졌습니다. 빠진 표현: {missing}\n"
+    "이 표현이 [규정 근거]의 어느 문장에 있는지 찾아보고, 그 조건을 포함해 답변을 다시 쓰세요.\n"
+    "- 근거에 없는 내용은 새로 더하지 마세요.\n"
+    "- 질문과 관계없는 조건이면 넣지 않아도 됩니다.\n"
+    "- 마지막 줄에 [근거: 1, 2] 형식을 다시 적으세요."
+)
+
+
 def split_citation(text: str, n_sources: int):
     """답변 끝의 [근거: 1, 2]를 떼어내 근거 번호 목록(0부터)으로 바꾼다. 없으면 전부 사용한 것으로 본다."""
     m = re.search(r"\[근거\s*:\s*([\d,\s]+)\]\s*$", text)
@@ -301,20 +375,39 @@ def answer(req: AnswerRequest):
     rewritten = rewrite_question(req.question, history, version) if history else None
     question = rewritten or req.question
 
-    results, used = retrieve(question, req.top_k, True, 20)
+    verify = state.get("verify_numbers") if req.verify_numbers is None else req.verify_numbers
+    results, used = retrieve(question, req.top_k, True, 20, exclude=req.exclude_docs)
     top_score = results[0].get("rerank_score") if results else None
-    base = {"question": req.question, "rewritten_question": rewritten, "top_score": top_score, "prompt_version": version}
+    base = {"question": req.question, "rewritten_question": rewritten, "top_score": top_score,
+            "prompt_version": version, "verify_numbers": verify}
 
     # 리랭커 1위 점수가 기준보다 낮으면 규정에 없는 질문으로 보고 LLM을 부르지 않는다
     if not results or (used and top_score < state["min_rerank_score"]):
         return {**base, "answered": False, "answer": NO_ANSWER, "sources": []}
 
-    text = generate_text(build_messages(question, results, version))
+    messages = build_messages(question, results, version)
+    text = generate_text(messages)
     body, used_idx = split_citation(text, len(results))
     answered = "확인되지 않습니다" not in body
+
+    # 숫자 조건이 빠졌으면 한 번만 다시 생성한다 (더 좋아졌을 때만 바꿔 쓴다)
+    check = None
+    if verify and answered:
+        miss = missing_numbers(body, results, used_idx)
+        check = {"missing": miss, "repaired": False}
+        if miss:
+            retry = generate_text(messages + [
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": REPAIR_HINT.format(missing=", ".join(miss))},
+            ])
+            r_body, r_idx = split_citation(retry, len(results))
+            if "확인되지 않습니다" not in r_body and len(missing_numbers(r_body, results, r_idx)) < len(miss):
+                body, used_idx = r_body, r_idx
+                check = {"missing": miss, "repaired": True, "still_missing": missing_numbers(body, results, used_idx)}
+
     sources = [
         {"doc": results[i]["doc"], "page": results[i]["page"], "heading": results[i]["heading"],
          "rerank_score": results[i].get("rerank_score"), "text": clean_text(results[i]["text"])}
         for i in used_idx
     ] if answered else []
-    return {**base, "answered": answered, "answer": body, "sources": sources}
+    return {**base, "answered": answered, "answer": body, "sources": sources, "verify": check}

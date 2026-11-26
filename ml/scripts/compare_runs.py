@@ -27,7 +27,9 @@ def main():
               ("규정 질문(직접 작성)", lambda r: r["type"] == "in_scope" and r.get("source") == "user"),
               ("함정·세부 질문", lambda r: r["type"] == "trap"),
               ("규정 외 질문", lambda r: r["type"] == "out_of_scope"),
-              ("멀티턴 질문", lambda r: r.get("source") == "multiturn")]
+              ("멀티턴 질문", lambda r: r.get("source") == "multiturn"),
+              ("└ 취업규칙 정답 문항", lambda r: r["type"] == "in_scope" and r.get("gold_doc") == "workrules_goyongnodong.pdf"),
+              ("└ 아난티 정답 문항", lambda r: r["type"] == "in_scope" and r.get("gold_doc") == "welfare_ananti.pdf")]
     print("=== 그룹별 평균 점수 (2점 만점) ===")
     print("그룹".ljust(18) + "".join(n.ljust(24) for n, _ in runs))
     for g, f in groups:
