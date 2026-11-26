@@ -12,7 +12,7 @@
     USE_RERANKER      (기본 1, 끄려면 0)
     USE_LLM           (기본 0, 답변 생성을 쓰려면 1)
     LLM_PATH          (기본 Qwen/Qwen3-8B)                       답변 생성 LLM (GPU 메모리가 모자라면 Qwen/Qwen3-4B)
-    PROMPT_VERSION    (기본 v4)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존). 요청마다 prompt_version 으로 바꿀 수도 있음
+    PROMPT_VERSION    (기본 v4)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존, v5=v4+전제 수용·없는 용어 적용 방지+재작성 개선+나열형 근거 5개). 요청마다 prompt_version 으로 바꿀 수도 있음
     VERIFY_NUMBERS    (기본 0, 켜려면 1)                         답변이 근거의 숫자 조건을 빠뜨리면 한 번 다시 생성. 평가에서 점수 개선이 없고 응답이 느려져 기본은 꺼 둠. 요청마다 verify_numbers 로 바꿀 수도 있음
     MIN_RERANK_SCORE  (기본 0.005)                               1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
     MAX_HISTORY_TURNS (기본 3)                                   멀티턴: 질문 재작성에 쓰는 최근 대화 턴 수
@@ -102,7 +102,25 @@ SYSTEM_PROMPT_V4 = SYSTEM_PROMPT_V3.replace(
 assert SYSTEM_PROMPT_V4 != SYSTEM_PROMPT_V3 and "매 2년마다" in SYSTEM_PROMPT_V4
 assert "최대 7문장" in SYSTEM_PROMPT_V4
 
-PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2, "v3": SYSTEM_PROMPT_V3, "v4": SYSTEM_PROMPT_V4}
+# v5: v4 에서 남은 실패 두 가지를 막는다 (v4 평가에서 만점이 아니었던 질문들의 공통 원인).
+# (1) 질문의 전제를 근거 확인 없이 받아들임 ("퇴직금 받으려면 무조건 IRP 만들어야 함?" → "네, 반드시 만들어야 합니다")
+# (2) 규정에 없는 제도·용어에 비슷한 다른 조항을 갖다 붙임 ("시차 신청은 며칠 전?" → 다른 휴가의 신청 기한을 시차에 적용)
+# 또 v4 는 근거 머리말에 문서 이름표가 빠져 있었는데(평가된 그대로 둠), v5 는 이름표를 다시 붙인다.
+SYSTEM_PROMPT_V5 = SYSTEM_PROMPT_V4.replace(
+    "4. 질문의 일부만 근거로 답할 수 있으면",
+    "3-1. 질문에 나온 제도·용어(특정 휴가 이름, 수당 이름, 신청 방식 등)가 [규정 근거]에 그대로 나오는지 먼저 확인하세요. "
+    "나오지 않으면 '질문하신 OO에 대한 규정은 확인되지 않습니다.'로 답을 시작하고, 비슷해 보이는 다른 제도의 내용을 그 대상의 규정인 것처럼 쓰지 마세요. "
+    "필요하면 '참고로' 뒤에 근거에 실제로 있는 관련 내용을 한 문장만 덧붙이세요.\n"
+    "4. 질문의 일부만 근거로 답할 수 있으면",
+).replace(
+    "6. 근거가 서로 다른 문서에서 왔으면",
+    "5-1. 질문이 어떤 사실을 전제하거나 유도하면('~도 늘어나나요?', '~해야 하나요?', '무조건 ~인가요?') '네'라고 답하기 전에 근거에 그 내용이 직접 적혀 있는지 확인하세요. "
+    "직접 적혀 있지 않거나 근거가 다르면 '아니요' 또는 '규정에는 그런 내용이 없습니다'로 시작하고, 근거에 실제로 적힌 내용(조건·한도)을 이어서 쓰세요. 질문의 전제를 그대로 받아 적지 마세요.\n"
+    "6. 근거가 서로 다른 문서에서 왔으면",
+)
+assert "3-1." in SYSTEM_PROMPT_V5 and "5-1." in SYSTEM_PROMPT_V5 and SYSTEM_PROMPT_V5 != SYSTEM_PROMPT_V4
+
+PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2, "v3": SYSTEM_PROMPT_V3, "v4": SYSTEM_PROMPT_V4, "v5": SYSTEM_PROMPT_V5}
 
 # v2 에서 근거 머리말에 쓰는 문서 이름표 (모르는 문서는 파일 이름 그대로 표시)
 DOC_LABELS = {
@@ -180,7 +198,7 @@ class HistoryTurn(BaseModel):
 class AnswerRequest(BaseModel):
     question: str = Field(min_length=1, description="직원의 질문")
     top_k: int = Field(3, ge=1, le=6, description="답변 근거로 LLM에 넘길 청크 개수")
-    prompt_version: str | None = Field(None, description="프롬프트 버전(v1~v4). 안 정하면 서버 기본값(PROMPT_VERSION)")
+    prompt_version: str | None = Field(None, description="프롬프트 버전(v1~v5). 안 정하면 서버 기본값(PROMPT_VERSION)")
     verify_numbers: bool | None = Field(None, description="숫자 조건 누락 검증 후 1회 재생성. 안 정하면 서버 기본값(VERIFY_NUMBERS)")
     exclude_docs: list[str] | None = Field(None, description="검색에서 뺄 문서(안 정하면 서버 기본값, 빈 목록이면 제외 없음)")
     history: list[HistoryTurn] | None = Field(None, description="멀티턴: 이전 대화(오래된 것부터). 있으면 질문을 독립된 질문으로 재작성한 뒤 검색")
@@ -233,7 +251,7 @@ def retrieve(question: str, top_k: int, rerank: bool, candidates: int, exclude: 
 
 def build_messages(question: str, results: list, version: str = "v1"):
     """M8 프롬프트: 규정 근거와 질문을 LLM 대화 형식으로 만든다"""
-    if version in ("v2", "v3"):
+    if version in ("v2", "v3", "v5"):   # v4 는 평가 당시 이름표 없이 동작해서 그대로 둔다
         blocks = [f"[근거 {n}] ({DOC_LABELS.get(r['doc'], r['doc'])} p.{r['page']})\n{r['text']}" for n, r in enumerate(results, start=1)]
     else:
         blocks = [f"[근거 {n}] ({r['doc']} p.{r['page']})\n{r['text']}" for n, r in enumerate(results, start=1)]
@@ -267,7 +285,20 @@ REWRITE_PROMPT_V3 = REWRITE_PROMPT.replace(
     "   마지막 질문이 이미 독립적이거나",
 )
 assert REWRITE_PROMPT_V3 != REWRITE_PROMPT
-REWRITE_PROMPTS = {"v1": REWRITE_PROMPT, "v2": REWRITE_PROMPT, "v3": REWRITE_PROMPT_V3, "v4": REWRITE_PROMPT_V3}
+# v5: 재작성이 (1) 직전 질문의 대상을 놓치거나('그동안 월급은?' → '월급은 어떻게 지급되나요?')
+# (2) 질문의 뜻을 비트는 문제('계정을 안 정하고 나가면요?' → '지정하지 않은 계정으로 받을 수 있나요?')를 막는다.
+REWRITE_PROMPT_V5 = REWRITE_PROMPT_V3.replace(
+    "4. 바꾼 질문 한 문장만 출력하세요.",
+    "4. '그동안', '그때', '그 경우', '그 계정', '그건'처럼 직전 내용을 가리키는 말은 직전 질문의 구체적인 대상(제도·기간·계정 등)으로 바꿔 쓰세요. "
+    "대상을 빼고 일반적인 질문으로 바꾸면 안 됩니다.\n"
+    "5. 질문의 뜻과 유형을 바꾸지 마세요. '~하면요?'는 '~하면 어떻게 되나요?'로 바꾸고, 예/아니오·방법·금액 같은 질문 유형을 그대로 유지하세요. 사용자가 말하지 않은 해석을 덧붙이지 마세요.\n"
+    "예시 (다른 주제):\n"
+    "- 직전 질문 '지각하면 어떻게 되나요?' / 마지막 질문 '그럼 세 번이면요?' → 지각을 세 번 하면 어떻게 되나요?\n"
+    "- 직전 질문 '교육훈련 기간은 얼마나 되나요?' / 마지막 질문 '그동안 월급은요?' → 교육훈련 기간 동안 월급은 지급되나요?\n"
+    "6. 바꾼 질문 한 문장만 출력하세요.",
+)
+assert "그동안" in REWRITE_PROMPT_V5 and REWRITE_PROMPT_V5 != REWRITE_PROMPT_V3
+REWRITE_PROMPTS = {"v1": REWRITE_PROMPT, "v2": REWRITE_PROMPT, "v3": REWRITE_PROMPT_V3, "v4": REWRITE_PROMPT_V3, "v5": REWRITE_PROMPT_V5}
 
 
 def rewrite_question(question: str, history: list, version: str = "v2") -> str:
@@ -332,6 +363,10 @@ REPAIR_HINT = (
 )
 
 
+# 나열형 질문('종류', '뭐가 있나요')은 근거 3개로는 항목을 다 못 담아서 v5 에서는 근거를 5개까지 쓴다.
+LIST_Q = re.compile(r"종류|뭐가\s*있|무엇이\s*있|어떤\s*\S{0,6}\s*(?:이|가)?\s*있")
+
+
 def split_citation(text: str, n_sources: int):
     """답변 끝의 [근거: 1, 2]를 떼어내 근거 번호 목록(0부터)으로 바꾼다. 없으면 전부 사용한 것으로 본다."""
     m = re.search(r"\[근거\s*:\s*([\d,\s]+)\]\s*$", text)
@@ -376,10 +411,11 @@ def answer(req: AnswerRequest):
     question = rewritten or req.question
 
     verify = state.get("verify_numbers") if req.verify_numbers is None else req.verify_numbers
-    results, used = retrieve(question, req.top_k, True, 20, exclude=req.exclude_docs)
+    top_k = max(req.top_k, 5) if (version == "v5" and LIST_Q.search(question)) else req.top_k
+    results, used = retrieve(question, top_k, True, 20, exclude=req.exclude_docs)
     top_score = results[0].get("rerank_score") if results else None
     base = {"question": req.question, "rewritten_question": rewritten, "top_score": top_score,
-            "prompt_version": version, "verify_numbers": verify}
+            "prompt_version": version, "verify_numbers": verify, "top_k_used": top_k}
 
     # 리랭커 1위 점수가 기준보다 낮으면 규정에 없는 질문으로 보고 LLM을 부르지 않는다
     if not results or (used and top_score < state["min_rerank_score"]):
