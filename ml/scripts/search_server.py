@@ -12,8 +12,8 @@
     USE_RERANKER      (기본 1, 끄려면 0)
     USE_LLM           (기본 0, 답변 생성을 쓰려면 1)
     LLM_PATH          (기본 Qwen/Qwen3-8B)                       답변 생성 LLM (GPU 메모리가 모자라면 Qwen/Qwen3-4B)
-    PROMPT_VERSION    (기본 v3)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존). 요청마다 prompt_version 으로 바꿀 수도 있음
-    VERIFY_NUMBERS    (기본 0, 켜려면 1)                         답변이 근거의 숫자 조건을 빠뜨리면 한 번 다시 생성. 요청마다 verify_numbers 로 바꿀 수도 있음
+    PROMPT_VERSION    (기본 v4)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존). 요청마다 prompt_version 으로 바꿀 수도 있음
+    VERIFY_NUMBERS    (기본 0, 켜려면 1)                         답변이 근거의 숫자 조건을 빠뜨리면 한 번 다시 생성. 평가에서 점수 개선이 없고 응답이 느려져 기본은 꺼 둠. 요청마다 verify_numbers 로 바꿀 수도 있음
     MIN_RERANK_SCORE  (기본 0.005)                               1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
     MAX_HISTORY_TURNS (기본 3)                                   멀티턴: 질문 재작성에 쓰는 최근 대화 턴 수
     EXCLUDE_DOCS      (기본 비어 있음)                           검색에서 뺄 문서 파일명(쉼표로 여러 개). 예: welfare_ananti.pdf. 요청마다 exclude_docs 로 바꿀 수도 있음(빈 목록이면 제외 없음)
@@ -146,7 +146,7 @@ async def lifespan(app):
     state["exclude_docs"] = [d.strip() for d in os.environ.get("EXCLUDE_DOCS", "").split(",") if d.strip()]
     state["max_history_turns"] = int(os.environ.get("MAX_HISTORY_TURNS", "3"))
     state["verify_numbers"] = os.environ.get("VERIFY_NUMBERS", "0") == "1"
-    state["prompt_version"] = os.environ.get("PROMPT_VERSION", "v3")
+    state["prompt_version"] = os.environ.get("PROMPT_VERSION", "v4")
     if state["prompt_version"] not in PROMPTS:
         raise ValueError(f"PROMPT_VERSION 은 {list(PROMPTS)} 중 하나여야 합니다.")
     state["min_rerank_score"] = float(os.environ.get("MIN_RERANK_SCORE", "0.005"))
@@ -267,7 +267,7 @@ REWRITE_PROMPT_V3 = REWRITE_PROMPT.replace(
     "   마지막 질문이 이미 독립적이거나",
 )
 assert REWRITE_PROMPT_V3 != REWRITE_PROMPT
-REWRITE_PROMPTS = {"v1": REWRITE_PROMPT, "v2": REWRITE_PROMPT, "v3": REWRITE_PROMPT_V3}
+REWRITE_PROMPTS = {"v1": REWRITE_PROMPT, "v2": REWRITE_PROMPT, "v3": REWRITE_PROMPT_V3, "v4": REWRITE_PROMPT_V3}
 
 
 def rewrite_question(question: str, history: list, version: str = "v2") -> str:
@@ -358,7 +358,7 @@ def embed_endpoint(req: EmbedRequest):
 @app.post("/search")
 def search(req: SearchRequest):
     """M5 + M6 (+ M7): 질문 -> 상위 k개 청크 (본문, 출처, 점수). 리랭커를 쓰면 rerank_score도 함께 반환"""
-    results, used = retrieve(req.question, req.top_k, req.rerank, req.candidates)
+    results, used = retrieve(req.question, req.top_k, req.rerank, req.candidates, exclude=req.exclude_docs)
     return {"question": req.question, "reranked": used, "results": results}
 
 
