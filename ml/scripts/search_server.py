@@ -12,9 +12,9 @@
     USE_RERANKER      (기본 1, 끄려면 0)
     USE_LLM           (기본 0, 답변 생성을 쓰려면 1)
     LLM_PATH          (기본 Qwen/Qwen3-8B)                       답변 생성 LLM (GPU 메모리가 모자라면 Qwen/Qwen3-4B)
-    PROMPT_VERSION    (기본 v4)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존, v5=v4+전제 수용·없는 용어 적용 방지+재작성 개선+나열형 근거 5개). 요청마다 prompt_version 으로 바꿀 수도 있음
+    PROMPT_VERSION    (기본 v4)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존, v5=기각(전제 확인 규칙이 q03 을 망침), v6=v4+없는 용어 규칙+재작성 개선+나열형 근거 5개). 요청마다 prompt_version 으로 바꿀 수도 있음
     VERIFY_NUMBERS    (기본 0, 켜려면 1)                         답변이 근거의 숫자 조건을 빠뜨리면 한 번 다시 생성. 평가에서 점수 개선이 없고 응답이 느려져 기본은 꺼 둠. 요청마다 verify_numbers 로 바꿀 수도 있음
-    MIN_RERANK_SCORE  (기본 0.005)                               1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
+    MIN_RERANK_SCORE  (기본 0.003)                               1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
     MAX_HISTORY_TURNS (기본 3)                                   멀티턴: 질문 재작성에 쓰는 최근 대화 턴 수
     EXCLUDE_DOCS      (기본 비어 있음)                           검색에서 뺄 문서 파일명(쉼표로 여러 개). 예: welfare_ananti.pdf. 요청마다 exclude_docs 로 바꿀 수도 있음(빈 목록이면 제외 없음)
     QDRANT_URL        (기본 http://localhost:6333)
@@ -120,7 +120,19 @@ SYSTEM_PROMPT_V5 = SYSTEM_PROMPT_V4.replace(
 )
 assert "3-1." in SYSTEM_PROMPT_V5 and "5-1." in SYSTEM_PROMPT_V5 and SYSTEM_PROMPT_V5 != SYSTEM_PROMPT_V4
 
-PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2, "v3": SYSTEM_PROMPT_V3, "v4": SYSTEM_PROMPT_V4, "v5": SYSTEM_PROMPT_V5}
+# v6: v5 평가 결과를 반영한 버전. v5 의 5-1(전제 확인)은 전제가 사실인 질문에도 '아니요'로 시작하게 만들어 q03 을 망쳤고,
+# 3-1 의 '참고로 한 문장 덧붙이기'는 u14 에서 근거 없는 내용을 지어내게 했다. 반면 3-1 의 문장 틀('질문하신 OO은 확인되지 않습니다')은
+# 멀티턴 m08 을 고쳤다. 그래서 v4 에 3-1 만, '참고로' 없이 넣는다. 근거 머리말은 v4 와 같게(파일명 그대로) 둬서 비교가 깔끔하다.
+SYSTEM_PROMPT_V6 = SYSTEM_PROMPT_V4.replace(
+    "4. 질문의 일부만 근거로 답할 수 있으면",
+    "3-1. 질문의 핵심 대상(특정 휴가 이름, 수당 이름, 신청 방식 등)이 [규정 근거]에 그대로 나오지 않으면 '질문하신 OO에 대한 규정은 확인되지 않습니다.'로 답하세요. "
+    "근거에 없는 내용을 추측하거나 다른 제도의 내용으로 채워 넣지 마세요.\n"
+    "4. 질문의 일부만 근거로 답할 수 있으면",
+)
+assert "3-1." in SYSTEM_PROMPT_V6 and "참고로" not in SYSTEM_PROMPT_V6 and "5-1." not in SYSTEM_PROMPT_V6
+assert SYSTEM_PROMPT_V6 != SYSTEM_PROMPT_V4
+
+PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2, "v3": SYSTEM_PROMPT_V3, "v4": SYSTEM_PROMPT_V4, "v5": SYSTEM_PROMPT_V5, "v6": SYSTEM_PROMPT_V6}
 
 # v2 에서 근거 머리말에 쓰는 문서 이름표 (모르는 문서는 파일 이름 그대로 표시)
 DOC_LABELS = {
@@ -167,7 +179,7 @@ async def lifespan(app):
     state["prompt_version"] = os.environ.get("PROMPT_VERSION", "v4")
     if state["prompt_version"] not in PROMPTS:
         raise ValueError(f"PROMPT_VERSION 은 {list(PROMPTS)} 중 하나여야 합니다.")
-    state["min_rerank_score"] = float(os.environ.get("MIN_RERANK_SCORE", "0.005"))
+    state["min_rerank_score"] = float(os.environ.get("MIN_RERANK_SCORE", "0.003"))
     state["client"] = QdrantClient(url=os.environ.get("QDRANT_URL", "http://localhost:6333"))
     state["collection"] = os.environ.get("COLLECTION", "welfare_chunks_bgem3")
     print(f"[서버 준비 완료] 임베딩: {model_path} / 리랭커: {state['reranker_path']} / LLM: {state['llm_path']} / 장치: {device} / 컬렉션: {state['collection']} / 프롬프트: {state['prompt_version']} / 숫자 검증: {'켜짐' if state['verify_numbers'] else '꺼짐'} / 제외 문서: {state['exclude_docs'] or '없음'}")
@@ -198,7 +210,7 @@ class HistoryTurn(BaseModel):
 class AnswerRequest(BaseModel):
     question: str = Field(min_length=1, description="직원의 질문")
     top_k: int = Field(3, ge=1, le=6, description="답변 근거로 LLM에 넘길 청크 개수")
-    prompt_version: str | None = Field(None, description="프롬프트 버전(v1~v5). 안 정하면 서버 기본값(PROMPT_VERSION)")
+    prompt_version: str | None = Field(None, description="프롬프트 버전(v1~v6). 안 정하면 서버 기본값(PROMPT_VERSION)")
     verify_numbers: bool | None = Field(None, description="숫자 조건 누락 검증 후 1회 재생성. 안 정하면 서버 기본값(VERIFY_NUMBERS)")
     exclude_docs: list[str] | None = Field(None, description="검색에서 뺄 문서(안 정하면 서버 기본값, 빈 목록이면 제외 없음)")
     history: list[HistoryTurn] | None = Field(None, description="멀티턴: 이전 대화(오래된 것부터). 있으면 질문을 독립된 질문으로 재작성한 뒤 검색")
@@ -298,7 +310,19 @@ REWRITE_PROMPT_V5 = REWRITE_PROMPT_V3.replace(
     "6. 바꾼 질문 한 문장만 출력하세요.",
 )
 assert "그동안" in REWRITE_PROMPT_V5 and REWRITE_PROMPT_V5 != REWRITE_PROMPT_V3
-REWRITE_PROMPTS = {"v1": REWRITE_PROMPT, "v2": REWRITE_PROMPT, "v3": REWRITE_PROMPT_V3, "v4": REWRITE_PROMPT_V3, "v5": REWRITE_PROMPT_V5}
+# v6: v5 재작성 예시의 단어('교육훈련 기간')를 모델이 실제 대화 대신 그대로 베껴 쓰는 문제(m02)를 막으려고 예시를 자리표시(X)로 바꿨다.
+REWRITE_PROMPT_V6 = REWRITE_PROMPT_V3.replace(
+    "4. 바꾼 질문 한 문장만 출력하세요.",
+    "4. '그동안', '그때', '그 경우', '그 계정', '그건'처럼 직전 내용을 가리키는 말은 [대화 기록]에 나온 구체적인 대상(제도·기간·계정 등)으로 바꿔 쓰세요. "
+    "대상을 빼고 일반적인 질문으로 바꾸면 안 됩니다.\n"
+    "5. 질문의 뜻과 유형을 바꾸지 마세요. '~하면요?'는 '~하면 어떻게 되나요?'로 바꾸고, 예/아니오·방법·금액 같은 질문 유형을 그대로 유지하세요. 사용자가 말하지 않은 해석을 덧붙이지 마세요.\n"
+    "형식 예시 (X 자리에는 반드시 [대화 기록]에 나온 실제 대상을 넣으세요. 예시의 단어를 그대로 쓰면 안 됩니다):\n"
+    "- 직전 질문 'X는 얼마나 쓸 수 있나요?' / 마지막 질문 '그동안 월급은요?' → X 기간 동안 월급은 지급되나요?\n"
+    "- 직전 질문 'X는 어디로 받나요?' / 마지막 질문 '그걸 안 정하면요?' → X를 정하지 않으면 어떻게 되나요?\n"
+    "6. 바꾼 질문 한 문장만 출력하세요.",
+)
+assert "형식 예시" in REWRITE_PROMPT_V6 and REWRITE_PROMPT_V6 != REWRITE_PROMPT_V3
+REWRITE_PROMPTS = {"v1": REWRITE_PROMPT, "v2": REWRITE_PROMPT, "v3": REWRITE_PROMPT_V3, "v4": REWRITE_PROMPT_V3, "v5": REWRITE_PROMPT_V5, "v6": REWRITE_PROMPT_V6}
 
 
 def rewrite_question(question: str, history: list, version: str = "v2") -> str:
@@ -411,7 +435,7 @@ def answer(req: AnswerRequest):
     question = rewritten or req.question
 
     verify = state.get("verify_numbers") if req.verify_numbers is None else req.verify_numbers
-    top_k = max(req.top_k, 5) if (version == "v5" and LIST_Q.search(question)) else req.top_k
+    top_k = max(req.top_k, 5) if (version in ("v5", "v6") and LIST_Q.search(question)) else req.top_k
     results, used = retrieve(question, top_k, True, 20, exclude=req.exclude_docs)
     top_score = results[0].get("rerank_score") if results else None
     base = {"question": req.question, "rewritten_question": rewritten, "top_score": top_score,
