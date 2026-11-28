@@ -12,7 +12,7 @@
     USE_RERANKER      (기본 1, 끄려면 0)
     USE_LLM           (기본 0, 답변 생성을 쓰려면 1)
     LLM_PATH          (기본 Qwen/Qwen3-8B)                       답변 생성 LLM (GPU 메모리가 모자라면 Qwen/Qwen3-4B)
-    PROMPT_VERSION    (기본 v7)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존, v5=기각(전제 확인 규칙이 q03 을 망침), v6=기각(규칙 3-1 이 q03·u11 을 망침), v7=v4 답변 프롬프트+재작성 개선(v6)+나열형 근거 5개). 요청마다 prompt_version 으로 바꿀 수도 있음
+    PROMPT_VERSION    (기본 v7)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존, v5=기각(전제 확인 규칙이 q03 을 망침), v6=기각(규칙 3-1 이 q03·u11 을 망침), v7=v4 답변 프롬프트+재작성 개선(v6)+나열형 근거 5개, v8=v7+재작성에서 직전 대화 우선). 요청마다 prompt_version 으로 바꿀 수도 있음
     VERIFY_NUMBERS    (기본 0, 켜려면 1)                         답변이 근거의 숫자 조건을 빠뜨리면 한 번 다시 생성. 평가에서 점수 개선이 없고 응답이 느려져 기본은 꺼 둠. 요청마다 verify_numbers 로 바꿀 수도 있음
     MIN_RERANK_SCORE  (기본 0.005)                               1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
     MAX_HISTORY_TURNS (기본 3)                                   멀티턴: 질문 재작성에 쓰는 최근 대화 턴 수
@@ -132,7 +132,7 @@ SYSTEM_PROMPT_V6 = SYSTEM_PROMPT_V4.replace(
 assert "3-1." in SYSTEM_PROMPT_V6 and "참고로" not in SYSTEM_PROMPT_V6 and "5-1." not in SYSTEM_PROMPT_V6
 assert SYSTEM_PROMPT_V6 != SYSTEM_PROMPT_V4
 
-PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2, "v3": SYSTEM_PROMPT_V3, "v4": SYSTEM_PROMPT_V4, "v5": SYSTEM_PROMPT_V5, "v6": SYSTEM_PROMPT_V6, "v7": SYSTEM_PROMPT_V4}
+PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2, "v3": SYSTEM_PROMPT_V3, "v4": SYSTEM_PROMPT_V4, "v5": SYSTEM_PROMPT_V5, "v6": SYSTEM_PROMPT_V6, "v7": SYSTEM_PROMPT_V4, "v8": SYSTEM_PROMPT_V4}
 
 # v2 에서 근거 머리말에 쓰는 문서 이름표 (모르는 문서는 파일 이름 그대로 표시)
 DOC_LABELS = {
@@ -210,7 +210,7 @@ class HistoryTurn(BaseModel):
 class AnswerRequest(BaseModel):
     question: str = Field(min_length=1, description="직원의 질문")
     top_k: int = Field(3, ge=1, le=6, description="답변 근거로 LLM에 넘길 청크 개수")
-    prompt_version: str | None = Field(None, description="프롬프트 버전(v1~v7). 안 정하면 서버 기본값(PROMPT_VERSION)")
+    prompt_version: str | None = Field(None, description="프롬프트 버전(v1~v8). 안 정하면 서버 기본값(PROMPT_VERSION)")
     verify_numbers: bool | None = Field(None, description="숫자 조건 누락 검증 후 1회 재생성. 안 정하면 서버 기본값(VERIFY_NUMBERS)")
     exclude_docs: list[str] | None = Field(None, description="검색에서 뺄 문서(안 정하면 서버 기본값, 빈 목록이면 제외 없음)")
     history: list[HistoryTurn] | None = Field(None, description="멀티턴: 이전 대화(오래된 것부터). 있으면 질문을 독립된 질문으로 재작성한 뒤 검색")
@@ -322,13 +322,35 @@ REWRITE_PROMPT_V6 = REWRITE_PROMPT_V3.replace(
     "6. 바꾼 질문 한 문장만 출력하세요.",
 )
 assert "형식 예시" in REWRITE_PROMPT_V6 and REWRITE_PROMPT_V6 != REWRITE_PROMPT_V3
-REWRITE_PROMPTS = {"v1": REWRITE_PROMPT, "v2": REWRITE_PROMPT, "v3": REWRITE_PROMPT_V3, "v4": REWRITE_PROMPT_V3, "v5": REWRITE_PROMPT_V5, "v6": REWRITE_PROMPT_V6, "v7": REWRITE_PROMPT_V6}
+
+# v8: 대화 기록이 2턴 이상일 때, 질문과 표현이 비슷한 '오래된' 대화에 끌려가는 문제를 막는다.
+# ('연차 → 병가 → 근무 년차에 따라 더 늘어나지는 않나요?' 가 연차 질문으로 재작성되던 사례)
+# 방식: 가장 최근 1턴을 [직전 대화], 나머지를 [이전 대화]로 따로 보여 주고, 대상은 [직전 대화]에서 먼저 찾게 한다.
+REWRITE_PROMPT_V8 = (
+    REWRITE_PROMPT_V6
+    .replace("[대화 기록]을 보고 [마지막 질문]을 대화 기록 없이도", "[직전 대화]와 [이전 대화](없을 수도 있음)를 보고 [마지막 질문]을 대화 기록 없이도")
+    .replace("2. 생략된 대상은 가장 최근 질문과 답변에서 먼저 찾으세요. 오래된 대화보다 바로 앞 대화가 더 중요합니다.",
+             "2. 생략된 대상은 [직전 대화]에서 먼저 찾으세요. [이전 대화]에 마지막 질문과 비슷한 표현이 있어도 [직전 대화]의 주제를 우선하고, "
+             "[직전 대화]에서 찾을 수 없을 때만 [이전 대화]를 보세요.")
+    .replace("[대화 기록]", "[직전 대화]")
+)
+assert "[대화 기록]" not in REWRITE_PROMPT_V8 and REWRITE_PROMPT_V8 != REWRITE_PROMPT_V6 and "[이전 대화]에 마지막 질문" in REWRITE_PROMPT_V8
+
+REWRITE_PROMPTS = {"v1": REWRITE_PROMPT, "v2": REWRITE_PROMPT, "v3": REWRITE_PROMPT_V3, "v4": REWRITE_PROMPT_V3, "v5": REWRITE_PROMPT_V5, "v6": REWRITE_PROMPT_V6, "v7": REWRITE_PROMPT_V6, "v8": REWRITE_PROMPT_V8}
 
 
 def rewrite_question(question: str, history: list, version: str = "v2") -> str:
     """멀티턴: 이전 대화를 보고 마지막 질문을 독립된 질문으로 바꾼다. 결과가 이상하면 원래 질문을 쓴다."""
-    convo = "\n".join(f"Q: {t.question.strip()}\nA: {t.answer.strip()[:300]}" for t in history)
-    user = f"[대화 기록]\n{convo}\n\n[마지막 질문]\n{question}\n\n[독립된 질문]"
+    def fmt(turns):
+        return "\n".join(f"Q: {t.question.strip()}\nA: {t.answer.strip()[:300]}" for t in turns)
+    if version == "v8":
+        parts = []
+        if len(history) > 1:
+            parts.append(f"[이전 대화]\n{fmt(history[:-1])}")
+        parts.append(f"[직전 대화]\n{fmt(history[-1:])}")
+        user = "\n\n".join(parts) + f"\n\n[마지막 질문]\n{question}\n\n[독립된 질문]"
+    else:
+        user = f"[대화 기록]\n{fmt(history)}\n\n[마지막 질문]\n{question}\n\n[독립된 질문]"
     raw = generate_text([{"role": "system", "content": REWRITE_PROMPTS[version]}, {"role": "user", "content": user}], max_new_tokens=100)
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     out = re.sub(r"^(독립된 질문|질문)\s*[:：]\s*", "", lines[0]).strip().strip('"\'“”‘’') if lines else ""
@@ -435,7 +457,7 @@ def answer(req: AnswerRequest):
     question = rewritten or req.question
 
     verify = state.get("verify_numbers") if req.verify_numbers is None else req.verify_numbers
-    top_k = max(req.top_k, 5) if (version in ("v5", "v6", "v7") and LIST_Q.search(question)) else req.top_k
+    top_k = max(req.top_k, 5) if (version in ("v5", "v6", "v7", "v8") and LIST_Q.search(question)) else req.top_k
     results, used = retrieve(question, top_k, True, 20, exclude=req.exclude_docs)
     top_score = results[0].get("rerank_score") if results else None
     base = {"question": req.question, "rewritten_question": rewritten, "top_score": top_score,
