@@ -12,7 +12,7 @@
     USE_RERANKER      (기본 1, 끄려면 0)
     USE_LLM           (기본 0, 답변 생성을 쓰려면 1)
     LLM_PATH          (기본 Qwen/Qwen3-8B)                       답변 생성 LLM (GPU 메모리가 모자라면 Qwen/Qwen3-4B)
-    PROMPT_VERSION    (기본 v8)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존, v5=기각(전제 확인 규칙이 q03 을 망침), v6=기각(규칙 3-1 이 q03·u11 을 망침), v7=v4 답변 프롬프트+재작성 개선(v6)+나열형 근거 5개, v8=v7+재작성에서 직전 대화 우선). 요청마다 prompt_version 으로 바꿀 수도 있음
+    PROMPT_VERSION    (기본 v7)                                  답변 프롬프트 버전 (v1=기존, v2=근거 충실성 강화, v3=v2+말투·질문 대상 일치, v4=v3+숫자 조건 보존, v5=기각(전제 확인 규칙이 q03 을 망침), v6=기각(규칙 3-1 이 q03·u11 을 망침), v7=v4 답변 프롬프트+재작성 개선(v6)+나열형 근거 5개, v8=기각(재작성이 주제 전환 질문을 직전 주제로 끌고 감: 연차→병가 질문이 연차로 재작성됨)). 요청마다 prompt_version 으로 바꿀 수도 있음
     VERIFY_NUMBERS    (기본 0, 켜려면 1)                         답변이 근거의 숫자 조건을 빠뜨리면 한 번 다시 생성. 평가에서 점수 개선이 없고 응답이 느려져 기본은 꺼 둠. 요청마다 verify_numbers 로 바꿀 수도 있음
     MIN_RERANK_SCORE  (기본 0.005)                               1위 리랭커 점수가 이보다 낮으면 "확인되지 않음"으로 답함
     MAX_HISTORY_TURNS (기본 1)                                   멀티턴: 질문 재작성에 쓰는 최근 대화 턴 수
@@ -176,7 +176,7 @@ async def lifespan(app):
     state["exclude_docs"] = [d.strip() for d in os.environ.get("EXCLUDE_DOCS", "").split(",") if d.strip()]
     state["max_history_turns"] = int(os.environ.get("MAX_HISTORY_TURNS", "1"))
     state["verify_numbers"] = os.environ.get("VERIFY_NUMBERS", "0") == "1"
-    state["prompt_version"] = os.environ.get("PROMPT_VERSION", "v8")
+    state["prompt_version"] = os.environ.get("PROMPT_VERSION", "v7")
     if state["prompt_version"] not in PROMPTS:
         raise ValueError(f"PROMPT_VERSION 은 {list(PROMPTS)} 중 하나여야 합니다.")
     state["min_rerank_score"] = float(os.environ.get("MIN_RERANK_SCORE", "0.005"))
